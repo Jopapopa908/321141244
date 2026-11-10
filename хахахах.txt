@@ -1,0 +1,2897 @@
+-- StarTurb | UI: Facility
+-- Совместимость: Potassium и другие UNC-экзекьюторы (Drawing, hookmetamethod, gethui, файлы).
+local env = getgenv()
+---------------------------------------------------------------- executor layer
+local executorName, executorVersion = "unknown", nil
+if type(identifyexecutor) == "function" then
+	local ok, n, v = pcall(identifyexecutor)
+	if ok then
+		if type(n) == "string" and n ~= "" then executorName = n end
+		if type(v) == "string" and v ~= "" then executorVersion = v end
+	end
+end
+
+local function httpGet(url)
+	if type(game.HttpGet) == "function" then
+		local ok, res = pcall(game.HttpGet, game, url)
+		if ok and type(res) == "string" then return res end
+	end
+	if type(httpget) == "function" then
+		local ok, res = pcall(httpget, url)
+		if ok and type(res) == "string" then return res end
+	end
+	if type(request) == "function" then
+		local ok, res = pcall(request, { Url = url, Method = "GET" })
+		if ok and type(res) == "table" then return res.Body end
+	end
+	return nil
+end
+
+local function freeDrawing(obj)
+	if not obj then return end
+	if not pcall(function() obj:Remove() end) then
+		pcall(function() obj:Destroy() end)
+	end
+end
+
+local TAG = string.format("%x", math.random(65536, 16777215))
+local caps = {
+	drawing = (type(Drawing) == "table") or (type(Drawing) == "userdata"),
+	hooks = (type(hookmetamethod) == "function") and (type(getnamecallmethod) == "function"),
+	files = (type(writefile) == "function") and (type(isfile) == "function"),
+	fps = (type(setfpscap) == "function"),
+	hui = (type(gethui) == "function"),
+}
+
+if env.StarTurbDebug then
+	pcall(print, string.format(
+		"[StarTurb] executor: %s %s | drawing:%s hooks:%s files:%s fps:%s hui:%s",
+		executorName, tostring(executorVersion or ""),
+		tostring(caps.drawing), tostring(caps.hooks), tostring(caps.files),
+		tostring(caps.fps), tostring(caps.hui)
+	))
+end
+
+pcall(function() setfpscap(999) end)
+
+if env.StarTurbUnload then
+	pcall(env.StarTurbUnload)
+end
+
+local UIS = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local RS = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local lp = Players.LocalPlayer
+local cam = Workspace.CurrentCamera
+
+local function guiContainer()
+	if type(gethui) == "function" then
+		local ok, h = pcall(gethui)
+		if ok and h then return h end
+	end
+	return CoreGui
+end
+
+local cfg = {
+	trigger = false,
+	triggerRMB = false,
+	triggerMaxDist = 300,
+	perWeaponDist = true,
+	shotsPerStep = 15,
+	triggerClick = true,
+	triggerWallCheck = false,
+	rapid = false,
+	rapidShots = 3,
+	menuOpen = true,
+	vis = true,
+	visBox = true,
+	visName = true,
+	visHealth = true,
+	visDistance = true,
+	visTracers = true,
+	visChams = true,
+	visTeamCheck = false,
+	visMaxDist = 0,
+	visTextSize = 13,
+	visBoxColor = Color3.fromRGB(170, 90, 255),
+	visNameColor = Color3.fromRGB(255, 255, 255),
+	visTracerColor = Color3.fromRGB(255, 255, 255),
+	visChamsFill = Color3.fromRGB(170, 90, 255),
+	visChamsOutline = Color3.fromRGB(255, 255, 255),
+	silent = false,
+	silentShootOnly = true,
+	silentPart = "Head",
+	silentHitChance = 100,
+	silentFov = 130,
+	silentFovShow = false,
+	silentWallCheck = false,
+	silentTeamCheck = false,
+	silentSkipKO = true,
+	silentMaxDist = 0,
+	silentPredict = 0,
+	silentJitter = 0,
+	silentMethod = "Raycast",
+	tpPart = "HumanoidRootPart",
+	tpTurbo = false,
+	trigSilent = false,
+	panicKey = Enum.KeyCode.End,
+	menuFx = true,
+	menuFxParticles = true,
+	menuFxBlur = 24,
+	menuFxDim = 65,
+	menuFxLink = 150,
+	hitboxEnabled = false,
+	hitboxSize = 8,
+	hitboxTransparency = 1,
+	hitboxOnlyTarget = false,
+	autoShotEnabled = false,
+	autoShotRandomDelay = true,
+	autoShotMinDelay = 0.05,
+	autoShotMaxDelay = 0.08,
+	autoShotBurstShots = 1,
+	autoShotBurstDelay = 0.01,
+	autoShotDelayBeforeShot = 0.01,
+	autoShotHoldTime = 0.01,
+	autoShotAllowFriendsAsHost = true,
+	autoShotShowEmoji = true,
+	autoShotWeapons = {
+		["[Shotgun]"] = true, ["[TacticalShotgun]"] = true,
+		["[Revolver]"] = true, ["[Double-Barrel SG]"] = true, ["[Pistol]"] = true,
+		["[SMG]"] = true, ["[Rifle]"] = true, ["[Sniper]"] = true, ["[Deagle]"] = true,
+	}
+}
+
+local roles = {}
+local conns = {}
+
+local function bind(signal, fn)
+	local c = signal:Connect(fn)
+	conns[#conns + 1] = c
+	return c
+end
+
+local bindMode = { trigger = "Toggle" }
+local holdDown = { trigger = false }
+
+local function isOn(name)
+	if bindMode[name] == "Hold" then
+		return holdDown[name]
+	end
+	return cfg[name]
+end
+
+local triggerGuns = {
+	["[Knife]"] = false,
+	["[Shotgun]"] = true,
+	["[TacticalShotgun]"] = true,
+	["[Revolver]"] = true,
+	["[Double-Barrel SG]"] = true,
+	["[Pistol]"] = true,
+	["[Silencer]"] = true,
+	["[Glock]"] = true,
+	["[SMG]"] = true,
+	["[Rifle]"] = true,
+	["[Sniper]"] = true,
+	["[Deagle]"] = true,
+}
+
+local triggerDist = {
+	["[Revolver]"] = 175,
+	["[Double-Barrel SG]"] = 150,
+	["[TacticalShotgun]"] = 150,
+	["[Shotgun]"] = 150,
+	["[Silencer]"] = 250,
+	["[Glock]"] = 250,
+	["[SMG]"] = 200,
+	["[Rifle]"] = 300,
+	["[Sniper]"] = 300,
+	["[Deagle]"] = 250,
+	Default = 300,
+}
+
+local rapidBlocked = {
+	["[Knife]"] = true,
+}
+
+local Library, Window
+local lmbHeld = false
+
+---------------------------------------------------------------- helpers
+local function isKO(char, hum)
+	if hum and hum.Health <= 0 then return true end
+	if char:GetAttribute("KO") or char:GetAttribute("Knocked") or char:GetAttribute("Ragdoll") then return true end
+	local fx = char:FindFirstChild("BodyEffects")
+	local ko = fx and fx:FindFirstChild("K.O")
+	if ko and ko.Value then return true end
+	return false
+end
+
+local function screenDist(pos)
+	local v, on = cam:WorldToViewportPoint(pos)
+	if not on or v.Z <= 0 then return nil end
+	return (Vector2.new(v.X, v.Y) - UIS:GetMouseLocation()).Magnitude
+end
+
+local function visibleFrom(origin, part, targetChar)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { lp.Character, targetChar }
+	return Workspace:Raycast(origin, part.Position - origin, params) == nil
+end
+
+local function getRole(plr)
+	return roles[plr.UserId] or "Neutral"
+end
+
+local function isIgnored(plr)
+	return getRole(plr) == "Friend"
+end
+
+local function notify(text)
+	Library:Notify({ Title = "StarTurb", Text = text, Duration = 2 })
+end
+
+---------------------------------------------------------------- Visuals (ESP)
+local visClear
+do
+	local visDrawingOk = (type(Drawing) == "table") or (type(Drawing) == "userdata")
+	local visFolder = Instance.new("Folder")
+	visFolder.Name = "F_" .. TAG
+	pcall(function() visFolder.Parent = guiContainer() end)
+	local visObjects = {}
+
+	local function visDraw(class, props)
+		if not visDrawingOk then return nil end
+		local ok, obj = pcall(Drawing.new, class)
+		if not ok or not obj then return nil end
+		for k, v in pairs(props) do obj[k] = v end
+		obj.Visible = false
+		return obj
+	end
+
+	local function visCreate(plr)
+		if visObjects[plr] then return end
+		local hl = Instance.new("Highlight")
+		hl.Name = plr.Name
+		hl.FillTransparency = 0.5
+		hl.OutlineTransparency = 0
+		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		hl.Enabled = false
+		hl.Parent = visFolder
+		local o = { hl = hl }
+		if visDrawingOk then
+			o.box    = visDraw("Square", { Thickness = 1.5, Filled = false })
+			o.name   = visDraw("Text", { Center = true, Outline = true })
+			o.dist   = visDraw("Text", { Center = true, Outline = true })
+			o.hpBack = visDraw("Square", { Filled = true, Color = Color3.new(0, 0, 0) })
+			o.hpFill = visDraw("Square", { Filled = true })
+			o.tracer = visDraw("Line", { Thickness = 1 })
+		end
+		visObjects[plr] = o
+	end
+
+	local function visHide(o)
+		for k, v in pairs(o) do
+			if k ~= "hl" and v then v.Visible = false end
+		end
+		if o.hl then o.hl.Enabled = false end
+	end
+
+	local function visDestroy(plr)
+		local o = visObjects[plr]
+		if not o then return end
+		for k, v in pairs(o) do
+			if k == "hl" then
+				pcall(function() v:Destroy() end)
+			elseif v then
+				freeDrawing(v)
+			end
+		end
+		visObjects[plr] = nil
+	end
+
+	function visClear()
+		for plr in pairs(visObjects) do
+			visDestroy(plr)
+		end
+		if visFolder then pcall(function() visFolder:Destroy() end) end
+	end
+
+	local function visScreenBounds(char)
+		local cf, size = char:GetBoundingBox()
+		local minX, minY = math.huge, math.huge
+		local maxX, maxY = -math.huge, -math.huge
+		for x = -1, 1, 2 do
+			for y = -1, 1, 2 do
+				for z = -1, 1, 2 do
+					local world = cf:PointToWorldSpace(Vector3.new(x, y, z) * size / 2)
+					local v = cam:WorldToViewportPoint(world)
+					if v.Z <= 0 then return nil end
+					minX = math.min(minX, v.X)
+					minY = math.min(minY, v.Y)
+					maxX = math.max(maxX, v.X)
+					maxY = math.max(maxY, v.Y)
+				end
+			end
+		end
+		return minX, minY, maxX, maxY
+	end
+
+	local function visUpdate(plr, o)
+		local char = plr.Character
+		if not char then return visHide(o) end
+		local hum  = char:FindFirstChildOfClass("Humanoid")
+		local root = char:FindFirstChild("HumanoidRootPart")
+		if not (hum and root and hum.Health > 0) then
+			return visHide(o)
+		end
+		if isIgnored(plr) then
+			return visHide(o)
+		end
+		if cfg.visTeamCheck and plr.Team ~= nil and plr.Team == lp.Team then
+			return visHide(o)
+		end
+		local dist = (root.Position - cam.CFrame.Position).Magnitude
+		if cfg.visMaxDist > 0 and dist > cfg.visMaxDist then
+			return visHide(o)
+		end
+		o.hl.Adornee = char
+		o.hl.FillColor = cfg.visChamsFill
+		o.hl.OutlineColor = cfg.visChamsOutline
+		o.hl.Enabled = cfg.visChams
+		if not visDrawingOk then return end
+		if not o.box then return end
+		local minX, minY, maxX, maxY = visScreenBounds(char)
+		if not minX then
+			for k, v in pairs(o) do
+				if k ~= "hl" and v then v.Visible = false end
+			end
+			return
+		end
+		local w, h = maxX - minX, maxY - minY
+		local cx = (minX + maxX) / 2
+		o.box.Visible = cfg.visBox
+		if cfg.visBox then
+			o.box.Color = cfg.visBoxColor
+			o.box.Position = Vector2.new(minX, minY)
+			o.box.Size = Vector2.new(w, h)
+		end
+		o.name.Visible = cfg.visName
+		if cfg.visName then
+			o.name.Text = plr.DisplayName ~= plr.Name and (plr.DisplayName .. " (" .. plr.Name .. ")") or plr.Name
+			o.name.Size = cfg.visTextSize
+			o.name.Color = cfg.visNameColor
+			o.name.Position = Vector2.new(cx, minY - cfg.visTextSize - 3)
+		end
+		o.dist.Visible = cfg.visDistance
+		if cfg.visDistance then
+			o.dist.Text = string.format("%d studs", math.floor(dist))
+			o.dist.Size = math.max(cfg.visTextSize - 1, 8)
+			o.dist.Color = cfg.visNameColor
+			o.dist.Position = Vector2.new(cx, maxY + 2)
+		end
+		o.hpBack.Visible = cfg.visHealth
+		o.hpFill.Visible = cfg.visHealth
+		if cfg.visHealth then
+			local ratio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+			local fillH = h * ratio
+			o.hpBack.Position = Vector2.new(minX - 6, minY - 1)
+			o.hpBack.Size = Vector2.new(5, h + 2)
+			o.hpFill.Position = Vector2.new(minX - 5, minY + h - fillH)
+			o.hpFill.Size = Vector2.new(3, fillH)
+			o.hpFill.Color = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(60, 255, 90), ratio)
+		end
+		o.tracer.Visible = cfg.visTracers
+		if cfg.visTracers then
+			o.tracer.Color = cfg.visTracerColor
+			o.tracer.From = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y)
+			o.tracer.To = Vector2.new(cx, maxY)
+		end
+	end
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= lp then visCreate(plr) end
+	end
+	bind(Players.PlayerAdded, function(plr)
+		if plr ~= lp then visCreate(plr) end
+	end)
+	bind(Players.PlayerRemoving, visDestroy)
+
+	local visWasOn = false
+	bind(RS.RenderStepped, function()
+		cam = Workspace.CurrentCamera or cam
+		local on = cfg.vis
+		if on then
+			for plr, o in pairs(visObjects) do
+				visUpdate(plr, o)
+			end
+		elseif visWasOn then
+			for _, o in pairs(visObjects) do
+				visHide(o)
+			end
+		end
+		visWasOn = on
+	end)
+end -- Visuals (ESP)
+
+---------------------------------------------------------------- Silent Aim
+local silentSupported, silentState, applySilent, silentDisableHooks, silentCircle, bulletTpShot, tpRestore
+silentState = { part = nil, char = nil, aim = nil }
+do
+	silentSupported = type(hookmetamethod) == "function"
+		and type(getnamecallmethod) == "function"
+		and type(checkcaller) == "function"
+	local silentOldNamecall
+	local silentHooked = false
+	local silentTargetPart, silentTargetChar, silentAim = nil, nil, nil
+	local silentRollT, silentRollOk = 0, true
+	local silentUnpack = table.unpack or unpack
+	local silentClosure = type(newcclosure) == "function" and newcclosure or function(f) return f end
+
+	local function silentShouldRedirect()
+		if not (cfg.silent and silentAim) then return false end
+		if cfg.silentShootOnly and not cfg.trigSilent
+			and not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+			return false
+		end
+		if cfg.silentHitChance < 100 then
+			local now = os.clock()
+			if now - silentRollT > 0.08 then
+				silentRollT = now
+				silentRollOk = math.random(1, 100) <= cfg.silentHitChance
+			end
+			if not silentRollOk then return false end
+		end
+		return true
+	end
+
+	local SILENT_HEAD_PARTS = { "Head" }
+	local SILENT_BODY_PARTS = { "UpperTorso", "Torso", "LowerTorso", "HumanoidRootPart" }
+	local SILENT_CLOSEST_PARTS = {
+		"Head", "UpperTorso", "LowerTorso", "HumanoidRootPart", "Torso",
+		"LeftUpperArm", "RightUpperArm", "LeftUpperLeg", "RightUpperLeg",
+		"Left Arm", "Right Arm", "Left Leg", "Right Leg",
+	}
+
+	local function silentFirstPart(char, names)
+		for _, name in ipairs(names) do
+			local p = char:FindFirstChild(name)
+			if p and p:IsA("BasePart") then return p end
+		end
+		return nil
+	end
+
+	local function silentPickPart(char)
+		local mode = cfg.silentPart
+		if mode == "Random" then
+			mode = math.random(1, 2) == 1 and "Head" or "Body"
+		end
+		if mode == "Head" then
+			return silentFirstPart(char, SILENT_HEAD_PARTS)
+		end
+		if mode == "Body" then
+			return silentFirstPart(char, SILENT_BODY_PARTS)
+		end
+		if mode ~= "Closest body part" then
+			local p = char:FindFirstChild(mode)
+			if p and p:IsA("BasePart") then return p end
+		end
+		local best, bestD = nil, math.huge
+		for _, name in ipairs(SILENT_CLOSEST_PARTS) do
+			local p = char:FindFirstChild(name)
+			if p and p:IsA("BasePart") then
+				local d = screenDist(p.Position)
+				if d and d < bestD then best, bestD = p, d end
+			end
+		end
+		return best
+	end
+
+	local function silentFindTarget()
+		local myChar = lp.Character
+		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		if not myRoot then return nil end
+		local best, bestD = nil, cfg.silentFov
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp and not isIgnored(plr) then
+				local char = plr.Character
+				local hum = char and char:FindFirstChildOfClass("Humanoid")
+				local root = char and char:FindFirstChild("HumanoidRootPart")
+				if char and hum and root and hum.Health > 0
+					and not (cfg.silentTeamCheck and plr.Team ~= nil and plr.Team == lp.Team)
+					and not (cfg.silentSkipKO and isKO(char, hum))
+					and not (cfg.silentMaxDist > 0 and (root.Position - myRoot.Position).Magnitude > cfg.silentMaxDist) then
+					local part = silentPickPart(char)
+					local d = part and screenDist(part.Position)
+					if d and d < bestD and (not cfg.silentWallCheck or visibleFrom(cam.CFrame.Position, part, char)) then
+						best, bestD = part, d
+					end
+				end
+			end
+		end
+		return best
+	end
+
+	pcall(function()
+		silentCircle = Drawing.new("Circle")
+		silentCircle.Thickness = 1.5
+		silentCircle.NumSides = 64
+		silentCircle.Filled = false
+		silentCircle.Color = Color3.fromRGB(170, 90, 255)
+		silentCircle.Visible = false
+	end)
+
+	local function silentEnableHooks()
+		if silentHooked or not silentSupported then return end
+		silentOldNamecall = hookmetamethod(game, "__namecall", silentClosure(function(self, ...)
+			if getnamecallmethod() == "Raycast" and self == Workspace
+				and not checkcaller() and silentShouldRedirect() then
+				local args = { ... }
+				local origin, dir = args[1], args[2]
+				if typeof(origin) == "Vector3" and typeof(dir) == "Vector3" then
+					local delta = silentAim - origin
+					if delta.Magnitude > 0.001 then
+						args[2] = delta.Unit * dir.Magnitude
+						return silentOldNamecall(self, silentUnpack(args))
+					end
+				end
+			end
+			return silentOldNamecall(self, ...)
+		end))
+		silentHooked = true
+	end
+
+	function silentDisableHooks()
+		silentHooked = false
+		local namecall = silentOldNamecall
+		silentOldNamecall = nil
+		if not namecall then return end
+		pcall(function()
+			hookmetamethod(game, "__namecall", namecall)
+		end)
+	end
+
+	function applySilent()
+		if cfg.silent and silentSupported and cfg.silentMethod == "Raycast" then
+			silentEnableHooks()
+		else
+			silentDisableHooks()
+		end
+	end
+
+---------------------------------------------------------------- Bullet teleport
+	local TP_GRIP = CFrame.new(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0)
+	local tpBusy = false
+
+	local function tpGrip(origin, target)
+		return (origin * TP_GRIP):ToObjectSpace(target):inverse()
+	end
+
+	local function tpFreezeGrip(tool)
+		if type(getconnections) ~= "function" then return end
+		pcall(function()
+			for _, c in ipairs(getconnections(tool:GetPropertyChangedSignal("Grip"))) do
+				pcall(function() c:Disable() end)
+			end
+		end)
+	end
+
+	bulletTpShot = function(tool, char)
+		if tpBusy or not tool or not char or not char.Parent then return false end
+		local me = lp.Character
+		local bp = lp:FindFirstChild("Backpack")
+		local hand = me and (me:FindFirstChild("RightHand") or me:FindFirstChild("Right Arm"))
+		local part = char:FindFirstChild(cfg.tpPart) or char:FindFirstChild("HumanoidRootPart")
+		if not (me and bp and hand and part and tool.Parent == me) then return false end
+		tpBusy = true
+		tpFreezeGrip(tool)
+		task.spawn(function()
+			local grip = tool.Grip
+			pcall(function()
+				tool.Parent = bp
+				tool.Grip = tpGrip(hand.CFrame, part.CFrame)
+				tool.Parent = me
+			end)
+			RS.RenderStepped:Wait()
+			pcall(function() tool:Activate() end)
+			RS.RenderStepped:Wait()
+			pcall(function()
+				tool.Parent = bp
+				tool.Grip = grip
+				tool.Parent = me
+			end)
+			tpBusy = false
+		end)
+		return true
+	end
+
+	local tpHoldTool, tpHoldChar, tpHoldGrip, tpHoldPos = nil, nil, nil, nil
+	tpRestore = function()
+		local t, g = tpHoldTool, tpHoldGrip
+		tpHoldTool, tpHoldChar, tpHoldGrip, tpHoldPos = nil, nil, nil, nil
+		if not (t and t.Parent and g) then return end
+		local me = lp.Character
+		local bp = lp:FindFirstChild("Backpack")
+		if not (me and bp and t.Parent == me) then
+			pcall(function() t.Grip = g end)
+			return
+		end
+		pcall(function()
+			t.Parent = bp
+			t.Grip = g
+			t.Parent = me
+		end)
+	end
+
+	local function tpTurbo()
+		if not (cfg.tpTurbo and cfg.silent and cfg.silentMethod == "Bullet teleport") then
+			if tpHoldTool then tpRestore() end
+			return
+		end
+		local me = lp.Character
+		local bp = lp:FindFirstChild("Backpack")
+		local tool = me and me:FindFirstChildOfClass("Tool")
+		local char = silentState.char
+		local hand = me and (me:FindFirstChild("RightHand") or me:FindFirstChild("Right Arm"))
+		local part = char and (char:FindFirstChild(cfg.tpPart) or char:FindFirstChild("HumanoidRootPart"))
+		if not (tool and bp and hand and part) then
+			if tpHoldTool then tpRestore() end
+			return
+		end
+		if tpHoldTool == tool and tpHoldChar == char and tpHoldPos
+			and (tpHoldPos - part.Position).Magnitude < 2 then
+			return
+		end
+		if tpHoldTool and tpHoldTool ~= tool then tpRestore() end
+		if tpHoldTool ~= tool then
+			tpFreezeGrip(tool)
+			tpHoldGrip = tool.Grip
+		end
+		local ok = pcall(function()
+			tool.Parent = bp
+			tool.Grip = tpGrip(hand.CFrame, part.CFrame)
+			tool.Parent = me
+		end)
+		if ok then
+			tpHoldTool, tpHoldChar, tpHoldPos = tool, char, part.Position
+		end
+	end
+
+	bind(RS.RenderStepped, function()
+		cam = Workspace.CurrentCamera or cam
+		if cfg.silent then
+			silentTargetPart = silentFindTarget()
+			if silentTargetPart then
+				local p = silentTargetPart.Position
+				if cfg.silentPredict > 0 then
+					p = p + silentTargetPart.AssemblyLinearVelocity * cfg.silentPredict
+				end
+				if cfg.silentJitter > 0 then
+					local j = cfg.silentJitter
+					p = p + Vector3.new(
+						(math.random() * 2 - 1) * j,
+						(math.random() * 2 - 1) * j,
+						(math.random() * 2 - 1) * j
+					)
+				end
+				silentAim = p
+				silentTargetChar = silentTargetPart.Parent
+			else
+				silentAim, silentTargetChar = nil, nil
+			end
+		else
+			silentTargetPart, silentTargetChar, silentAim = nil, nil, nil
+		end
+		silentState.part, silentState.char, silentState.aim = silentTargetPart, silentTargetChar, silentAim
+		tpTurbo()
+		if silentCircle then
+			local show = cfg.silent and cfg.silentFovShow
+			silentCircle.Visible = show
+			if show then
+				silentCircle.Radius = cfg.silentFov
+				silentCircle.Position = UIS:GetMouseLocation()
+			end
+		end
+	end)
+end -- Silent Aim
+
+---------------------------------------------------------------- Friends List
+local refreshPlayerList, setFriendsWindow, friendsGui
+do
+	local ROLE_COLORS = {
+		Neutral = Color3.fromRGB(110, 110, 135),
+		Target = Color3.fromRGB(255, 60, 60),
+		Friend = Color3.fromRGB(60, 220, 120),
+	}
+	local ROLE_ORDER = { "Neutral", "Target", "Friend" }
+	local ROW_BG = Color3.fromRGB(28, 28, 36)
+	local ROW_TEXT = Color3.fromRGB(235, 235, 245)
+	local listScroll
+	local playerRowRefs = {}
+
+	function refreshPlayerList()
+		if not listScroll then return end
+		for _, row in pairs(playerRowRefs) do
+			pcall(function() row:Destroy() end)
+		end
+		playerRowRefs = {}
+		local list = {}
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp then list[#list + 1] = plr end
+		end
+		table.sort(list, function(a, b)
+			return a.DisplayName:lower() < b.DisplayName:lower()
+		end)
+		for order, plr in ipairs(list) do
+			local role = getRole(plr)
+			local row = Instance.new("Frame")
+			row.Size = UDim2.new(1, -4, 0, 44)
+			row.BackgroundColor3 = ROW_BG
+			row.BorderSizePixel = 0
+			row.LayoutOrder = order
+			row.Parent = listScroll
+			Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+			local nameContainer = Instance.new("Frame", row)
+			nameContainer.Size = UDim2.new(1, -120, 1, -8)
+			nameContainer.Position = UDim2.new(0, 10, 0, 4)
+			nameContainer.BackgroundTransparency = 1
+			local displayLbl = Instance.new("TextLabel", nameContainer)
+			displayLbl.Size = UDim2.new(1, 0, 0.55, 0)
+			displayLbl.BackgroundTransparency = 1
+			displayLbl.Text = plr.DisplayName
+			displayLbl.TextColor3 = ROW_TEXT
+			displayLbl.Font = Enum.Font.GothamSemibold
+			displayLbl.TextSize = 12
+			displayLbl.TextXAlignment = Enum.TextXAlignment.Left
+			displayLbl.TextTruncate = Enum.TextTruncate.AtEnd
+			local userLbl = Instance.new("TextLabel", nameContainer)
+			userLbl.Size = UDim2.new(1, 0, 0.45, 0)
+			userLbl.Position = UDim2.new(0, 0, 0.55, 0)
+			userLbl.BackgroundTransparency = 1
+			userLbl.Text = "@" .. plr.Name
+			userLbl.TextColor3 = Color3.fromRGB(150, 150, 165)
+			userLbl.Font = Enum.Font.Gotham
+			userLbl.TextSize = 10
+			userLbl.TextXAlignment = Enum.TextXAlignment.Left
+			userLbl.TextTruncate = Enum.TextTruncate.AtEnd
+			local roleBtn = Instance.new("TextButton", row)
+			roleBtn.Size = UDim2.new(0, 95, 0, 28)
+			roleBtn.Position = UDim2.new(1, -105, 0.5, -14)
+			roleBtn.BackgroundColor3 = ROLE_COLORS[role] or ROLE_COLORS.Neutral
+			roleBtn.Text = role
+			roleBtn.TextColor3 = Color3.new(1, 1, 1)
+			roleBtn.Font = Enum.Font.GothamBold
+			roleBtn.TextSize = 11
+			roleBtn.AutoButtonColor = true
+			Instance.new("UICorner", roleBtn).CornerRadius = UDim.new(0, 6)
+			roleBtn.MouseButton1Click:Connect(function()
+				local idx = table.find(ROLE_ORDER, role) or 1
+				local nextRole = ROLE_ORDER[(idx % #ROLE_ORDER) + 1]
+				roles[plr.UserId] = nextRole ~= "Neutral" and nextRole or nil
+				role = nextRole
+				roleBtn.Text = nextRole
+				roleBtn.BackgroundColor3 = ROLE_COLORS[nextRole]
+			end)
+			playerRowRefs[plr.UserId] = row
+		end
+	end
+
+	local function buildFriendsWindow()
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "L_" .. TAG
+		gui.ResetOnSpawn = false
+		gui.DisplayOrder = 50
+		gui.Enabled = false
+		pcall(function() gui.Parent = guiContainer() end)
+		local main = Instance.new("Frame")
+		main.Size = UDim2.new(0, 300, 0, 380)
+		main.Position = UDim2.new(0, 40, 0.5, -190)
+		main.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+		main.BorderSizePixel = 0
+		main.Parent = gui
+		Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+		local title = Instance.new("TextLabel")
+		title.Size = UDim2.new(1, 0, 0, 32)
+		title.BackgroundColor3 = Color3.fromRGB(28, 28, 38)
+		title.BorderSizePixel = 0
+		title.Text = "Friends List  (drag)"
+		title.TextColor3 = ROW_TEXT
+		title.Font = Enum.Font.GothamBold
+		title.TextSize = 13
+		title.Parent = main
+		Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+		local scroll = Instance.new("ScrollingFrame")
+		scroll.Size = UDim2.new(1, -12, 1, -44)
+		scroll.Position = UDim2.new(0, 6, 0, 38)
+		scroll.BackgroundTransparency = 1
+		scroll.BorderSizePixel = 0
+		scroll.ScrollBarThickness = 4
+		scroll.CanvasSize = UDim2.new()
+		scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		scroll.Parent = main
+		local layout = Instance.new("UIListLayout", scroll)
+		layout.Padding = UDim.new(0, 4)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		local dragging, dragStart, startPos = false, nil, nil
+		bind(title.InputBegan, function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragStart = i.Position
+				startPos = main.Position
+			end
+		end)
+		bind(UIS.InputChanged, function(i)
+			if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+				local d = i.Position - dragStart
+				main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+			end
+		end)
+		bind(UIS.InputEnded, function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+				dragging = false
+			end
+		end)
+		friendsGui, listScroll = gui, scroll
+	end
+
+	buildFriendsWindow()
+
+	function setFriendsWindow(state)
+		if not friendsGui then return end
+		friendsGui.Enabled = state
+		if state then refreshPlayerList() end
+	end
+
+	bind(Players.PlayerAdded, function()
+		if friendsGui and friendsGui.Enabled then refreshPlayerList() end
+	end)
+	bind(Players.PlayerRemoving, function(plr)
+		if friendsGui and friendsGui.Enabled then
+			task.defer(refreshPlayerList)
+		end
+	end)
+end -- Friends List
+
+---------------------------------------------------------------- triggerbot (ОПТИМИЗИРОВАНО: 2 потока)
+local getTool, getTriggerDist, updateTrigger, disconnectTrigger
+local trigApi = {}
+do
+	local triggerRunning = false
+	local mouse = lp:GetMouse()
+	local cTool, cAmmo
+	local cachedChar, cachedTool, cachedAmmo
+
+	function trigApi.ko(pl)
+		local root = Workspace:FindFirstChild("Players") and Workspace.Players:FindFirstChild(pl.Name) or pl.Character
+		if not root then return false end
+		local be = root:FindFirstChild("BodyEffects")
+		if not be then return false end
+		local ko = be:FindFirstChild("K.O") or be:FindFirstChild("K.O.")
+		return (ko and ko:IsA("BoolValue") and ko.Value) or false
+	end
+
+	function trigApi.wall(part)
+		local myRoot = cachedChar and cachedChar:FindFirstChild("HumanoidRootPart")
+		if not myRoot then return true end
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { cachedChar, Workspace.CurrentCamera, part.Parent }
+		return Workspace:Raycast(myRoot.Position, part.Position - myRoot.Position, params) ~= nil
+	end
+
+	local virtualUser
+	function trigApi.fire(tool)
+		if cfg.triggerClick then
+			if type(mouse1click) == "function" then
+				mouse1click()
+				return
+			end
+			local c = Workspace.CurrentCamera
+			if c then
+				virtualUser = virtualUser or game:GetService("VirtualUser")
+				virtualUser:CaptureController()
+				virtualUser:Button1Down(Vector2.new(0, 0), c.CFrame)
+				virtualUser:Button1Up(Vector2.new(0, 0), c.CFrame)
+			end
+			return
+		end
+		for _ = 1, cfg.shotsPerStep do
+			pcall(function() tool:Activate() end)
+		end
+	end
+
+	function getTool(char)
+		if cTool and cTool.Parent == char then
+			return cTool, cAmmo
+		end
+		cTool = char:FindFirstChildWhichIsA("Tool")
+		cAmmo = cTool and cTool:FindFirstChild("Ammo")
+		return cTool, cAmmo
+	end
+
+	function getTriggerDist(tool)
+		if not cfg.perWeaponDist then
+			return cfg.triggerMaxDist
+		end
+		return triggerDist[tool.Name] or triggerDist.Default
+	end
+
+	local function triggerStep()
+		cachedChar = lp.Character
+		if not cachedChar then return end
+		
+		cachedTool, cachedAmmo = getTool(cachedChar)
+		if not cachedTool or not cachedAmmo or not triggerGuns[cachedTool.Name] then return end
+		if cachedAmmo:IsA("IntValue") and cachedAmmo.Value <= 0 then return end
+		
+		local part = mouse.Target
+		if not part or not part.Parent then return end
+		
+		local parent = part.Parent
+		local target = Players:GetPlayerFromCharacter(parent)
+			or (parent.Parent and Players:GetPlayerFromCharacter(parent.Parent))
+		if not target or target == lp then return end
+		if isIgnored(target) then return end
+		
+		local tchar = target.Character
+		local hum = tchar and tchar:FindFirstChildOfClass("Humanoid")
+		if not hum or hum.Health <= 0 then return end
+		if trigApi.ko(target) then return end
+		if tchar:FindFirstChild("GRABBING_CONSTRAINT") then return end
+		
+		local myRoot = cachedChar:FindFirstChild("HumanoidRootPart")
+		if myRoot and (myRoot.Position - part.Position).Magnitude > getTriggerDist(cachedTool) then
+			return
+		end
+		if cfg.triggerWallCheck and trigApi.wall(part) then return end
+		
+		if cfg.silentMethod == "Bullet teleport" and not cfg.tpTurbo and bulletTpShot(cachedTool, tchar) then
+			return
+		end
+		trigApi.fire(cachedTool)
+	end
+
+	function updateTrigger()
+		if triggerRunning then return end
+		triggerRunning = true
+		
+		task.spawn(function()
+			while triggerRunning do
+				if isOn("trigger") and not (cfg.triggerRMB and not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)) then
+					pcall(triggerStep)
+				end
+				task.wait(0)
+			end
+		end)
+		
+		task.spawn(function()
+			while triggerRunning do
+				if isOn("trigger") and not (cfg.triggerRMB and not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)) then
+					pcall(triggerStep)
+				end
+				task.wait(0)
+			end
+		end)
+	end
+
+	function disconnectTrigger()
+		triggerRunning = false
+	end
+end -- triggerbot
+
+---------------------------------------------------------------- TriggerSilent (ВОССТАНОВЛЕНО: 6 потоков + RenderStepped + Heartbeat)
+local trigSilentRunning = false
+
+local function trigSilentStep()
+	local target = silentState.char
+	if not target or not target.Parent then return end
+	
+	local myChar = lp.Character
+	if not myChar then return end
+	
+	local tool, ammo = getTool(myChar)
+	if not tool or not ammo or not triggerGuns[tool.Name] then return end
+	if ammo:IsA("IntValue") and ammo.Value <= 0 then return end
+	
+	local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+	local targetRoot = target:FindFirstChild("HumanoidRootPart") or silentState.part
+	if myRoot and targetRoot and (myRoot.Position - targetRoot.Position).Magnitude > getTriggerDist(tool) then
+		return
+	end
+	
+	local tplr = Players:GetPlayerFromCharacter(target)
+	if tplr and isIgnored(tplr) then return end
+	if tplr and trigApi.ko(tplr) then return end
+	if target:FindFirstChild("GRABBING_CONSTRAINT") then return end
+	if cfg.triggerWallCheck and silentState.part and trigApi.wall(silentState.part) then return end
+	
+	if cfg.silentMethod == "Bullet teleport" and not cfg.tpTurbo and bulletTpShot(tool, target) then
+		return
+	end
+	pcall(trigApi.fire, tool)
+end
+
+-- 6 потоков для высокой частоты стрельбы
+for i = 1, 6 do
+	task.spawn(function()
+		while true do
+			if cfg.trigSilent and cfg.silent then pcall(trigSilentStep) end
+			task.wait(0)
+		end
+	end)
+end
+
+-- Соединения с событиями рендера для максимальной частоты
+RS.Heartbeat:Connect(function()
+	if cfg.trigSilent and cfg.silent then pcall(trigSilentStep) end
+end)
+
+RS.RenderStepped:Connect(function()
+	if cfg.trigSilent and cfg.silent then pcall(trigSilentStep) end
+end)
+
+RS.Stepped:Connect(function()
+	if cfg.trigSilent and cfg.silent then pcall(trigSilentStep) end
+end)
+
+---------------------------------------------------------------- rapid
+local updateRapid, disconnectRapid
+do
+	local rapidConn
+	local function rapidStep()
+		if not lmbHeld then return end
+		local char = lp.Character
+		local tool = char and char:FindFirstChildWhichIsA("Tool")
+		if not tool or rapidBlocked[tool.Name] or not tool:FindFirstChild("Ammo") then return end
+		for _ = 1, cfg.rapidShots do
+			tool:Activate()
+		end
+	end
+
+	function updateRapid()
+		if rapidConn then
+			rapidConn:Disconnect()
+			rapidConn = nil
+		end
+		if cfg.rapid then
+			rapidConn = RS.Heartbeat:Connect(function()
+				pcall(rapidStep)
+			end)
+		end
+	end
+
+	function disconnectRapid()
+		if rapidConn then
+			pcall(function() rapidConn:Disconnect() end)
+			rapidConn = nil
+		end
+	end
+
+	bind(UIS.InputBegan, function(inp, processed)
+		if not processed and inp.UserInputType == Enum.UserInputType.MouseButton1 then
+			lmbHeld = true
+		end
+	end)
+	bind(UIS.InputEnded, function(inp)
+		if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+			lmbHeld = false
+		end
+	end)
+end -- rapid
+
+---------------------------------------------------------------- Mod Detector (ОПТИМИЗИРОВАНО: интервал 0.5с)
+local mdCleanup, mdScanAll, mdBuildPanel, mdDestroyPanel, mdConf
+do
+	local SoundService = game:GetService("SoundService")
+	local StarterGui   = game:GetService("StarterGui")
+	local Debris       = game:GetService("Debris")
+	local HttpService  = game:GetService("HttpService")
+	local MD = {
+		enabled = true,
+		showESP = true,
+		showWatcherStatus = true,
+		notifyOnJoin = true,
+		playSound = true,
+		soundId = 6753645454,
+		groups = {
+			{id = 605595634, minRank = 20, label = "BH STAFF TEAM"},
+			{id = 925309458, minRank = 50, label = "MOD"},
+		},
+		knownNames = {
+			["boomffa_mod"] = true, ["boomffaadmin"] = true, ["boomffa_admin"] = true,
+			["boomffa_staff"] = true, ["boom_moderator"] = true, ["boomgamemod"] = true,
+		},
+		symbols = {"✅", "☑️", "👑", "⭐", "🛡️", "✨", "🌟", "⚡", "🔱", "💎", "🏆", "🎖️"},
+		cache = {},
+		notified = {},
+		espObjects = {},
+		watcherStatus = {},
+		saved = {},
+		storageFile = "StarTurb_mods.txt",
+		adminPanel = nil,
+		adminPanelGui = nil,
+		espFolder = nil,
+		running = true,
+	}
+	mdConf = MD
+
+	do
+		local f = Instance.new("Folder")
+		f.Name = "MD_" .. TAG
+		pcall(function() f.Parent = guiContainer() end)
+		MD.espFolder = f
+	end
+
+	pcall(function()
+		if readfile and isfile and isfile(MD.storageFile) then
+			local content = readfile(MD.storageFile)
+			if content and content ~= "" then
+				MD.saved = HttpService:JSONDecode(content) or {}
+			end
+		end
+	end)
+
+	local function saveSaved()
+		pcall(function()
+			if writefile then
+				writefile(MD.storageFile, HttpService:JSONEncode(MD.saved))
+			end
+		end)
+	end
+
+	local function addSaved(player, label)
+		if not MD.saved[tostring(player.UserId)] then
+			MD.saved[tostring(player.UserId)] = {
+				name = player.Name,
+				label = label or "Detected",
+				date = os.date("%Y-%m-%d %H:%M"),
+			}
+			saveSaved()
+		end
+	end
+
+	local function hasSymbol(name)
+		for _, sym in ipairs(MD.symbols) do
+			if string.find(name, sym, 1, true) then return true end
+		end
+		return false
+	end
+
+	local function isMod(player)
+		if not player or player == lp then return false, nil, 0 end
+		local cached = MD.cache[player.UserId]
+		if cached then return cached.isMod, cached.label, cached.rank end
+		local nameLower = player.Name:lower()
+		local displayLower = player.DisplayName:lower()
+		if MD.knownNames[nameLower] or MD.knownNames[displayLower] then
+			MD.cache[player.UserId] = {isMod = true, label = "Known Mod", rank = 0}
+			return true, "Known Mod", 0
+		end
+		if hasSymbol(player.Name) or hasSymbol(player.DisplayName) then
+			MD.cache[player.UserId] = {isMod = true, label = "Mod Symbol", rank = 0}
+			return true, "Mod Symbol", 0
+		end
+		local labels = {}
+		local highest = 0
+		for _, group in ipairs(MD.groups) do
+			local ok, rank = pcall(function() return player:GetRankInGroup(group.id) end)
+			if ok and type(rank) == "number" and rank >= group.minRank then
+				local roleName = group.label
+				pcall(function()
+					local r = player:GetRoleInGroup(group.id)
+					if r and r ~= "" then roleName = r .. " [" .. group.label .. "]" end
+				end)
+				labels[#labels + 1] = roleName
+				if rank > highest then highest = rank end
+			end
+		end
+		if #labels > 0 then
+			local combined = table.concat(labels, " / ")
+			MD.cache[player.UserId] = {isMod = true, label = combined, rank = highest}
+			return true, combined, highest
+		end
+		MD.cache[player.UserId] = {isMod = false, label = nil, rank = 0}
+		return false, nil, 0
+	end
+
+	local function isWatchingMe(modPlayer)
+		if not modPlayer or modPlayer == lp then return false end
+		local myChar = lp.Character
+		local modChar = modPlayer.Character
+		if not myChar or not modChar then return false end
+		local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+		local modHead = modChar:FindFirstChild("Head")
+		if not myHRP or not modHead then return false end
+		local toMe = myHRP.Position - modHead.Position
+		if toMe.Magnitude > 300 then return false end
+		toMe = toMe.Unit
+		if modHead.CFrame.LookVector:Dot(toMe) < 0.85 then return false end
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = {modChar}
+		params.IgnoreWater = true
+		local result = Workspace:Raycast(modHead.Position, myHRP.Position - modHead.Position, params)
+		if result and result.Instance then
+			local hitModel = result.Instance:FindFirstAncestorOfClass("Model")
+			if hitModel ~= myChar then return false end
+		end
+		return true
+	end
+
+	local function clearESP(player)
+		local objs = MD.espObjects[player.UserId]
+		if not objs then return end
+		pcall(function() if objs.highlight then objs.highlight:Destroy() end end)
+		pcall(function() if objs.billboard then objs.billboard:Destroy() end end)
+		MD.espObjects[player.UserId] = nil
+	end
+
+	local function createESP(player, label)
+		clearESP(player)
+		if not MD.espFolder then return end
+		local hl = Instance.new("Highlight")
+		hl.Name = "md_" .. player.UserId
+		hl.FillColor = Color3.fromRGB(255, 150, 0)
+		hl.OutlineColor = Color3.fromRGB(255, 100, 0)
+		hl.FillTransparency = 0.5
+		hl.OutlineTransparency = 0
+		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		hl.Adornee = player.Character
+		hl.Parent = MD.espFolder
+		local bg = Instance.new("BillboardGui")
+		bg.Name = "mdbb_" .. player.UserId
+		bg.Size = UDim2.new(0, 260, 0, 44)
+		bg.StudsOffset = Vector3.new(0, 3.2, 0)
+		bg.AlwaysOnTop = true
+		bg.ResetOnSpawn = false
+		bg.Adornee = player.Character and player.Character:FindFirstChild("Head") or nil
+		bg.Parent = MD.espFolder
+		local frame = Instance.new("Frame", bg)
+		frame.Size = UDim2.fromScale(1, 1)
+		frame.BackgroundColor3 = Color3.fromRGB(20, 0, 0)
+		frame.BackgroundTransparency = 0.25
+		frame.BorderSizePixel = 0
+		Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
+		local lbl = Instance.new("TextLabel", frame)
+		lbl.Size = UDim2.new(1, -8, 0.55, 0)
+		lbl.Position = UDim2.new(0, 4, 0, 2)
+		lbl.BackgroundTransparency = 1
+		lbl.Font = Enum.Font.GothamBold
+		lbl.TextSize = 13
+		lbl.TextColor3 = Color3.fromRGB(255, 90, 90)
+		lbl.Text = "🚨 MOD: " .. player.Name
+		lbl.TextXAlignment = Enum.TextXAlignment.Left
+		lbl.TextTruncate = Enum.TextTruncate.AtEnd
+		local statusLbl = Instance.new("TextLabel", frame)
+		statusLbl.Size = UDim2.new(1, -8, 0.4, 0)
+		statusLbl.Position = UDim2.new(0, 4, 0.58, 0)
+		statusLbl.BackgroundTransparency = 1
+		statusLbl.Font = Enum.Font.GothamSemibold
+		statusLbl.TextSize = 10
+		statusLbl.TextColor3 = Color3.fromRGB(255, 200, 200)
+		statusLbl.Text = "[" .. label .. "]"
+		statusLbl.TextXAlignment = Enum.TextXAlignment.Left
+		statusLbl.TextTruncate = Enum.TextTruncate.AtEnd
+		MD.espObjects[player.UserId] = { highlight = hl, billboard = bg, statusLabel = statusLbl }
+	end
+
+	local function refreshESP(player)
+		local isMd, label = isMod(player)
+		if not isMd then
+			clearESP(player)
+			MD.watcherStatus[player.UserId] = nil
+			return
+		end
+		if not MD.showESP then
+			clearESP(player)
+			return
+		end
+		if not MD.espObjects[player.UserId] then
+			createESP(player, label or "Mod")
+		end
+		local objs = MD.espObjects[player.UserId]
+		if not objs or not objs.highlight or not objs.highlight.Parent then return end
+		objs.highlight.Adornee = player.Character
+		local watching = MD.showWatcherStatus and isWatchingMe(player)
+		MD.watcherStatus[player.UserId] = watching and "watching" or "not"
+		if watching then
+			objs.highlight.FillColor = Color3.fromRGB(255, 0, 0)
+			objs.highlight.OutlineColor = Color3.fromRGB(255, 0, 0)
+			if objs.statusLabel then
+				objs.statusLabel.Text = "👁 СЛЕДИТ ЗА ТОБОЙ!"
+				objs.statusLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+			end
+		else
+			objs.highlight.FillColor = Color3.fromRGB(255, 150, 0)
+			objs.highlight.OutlineColor = Color3.fromRGB(255, 100, 0)
+			if objs.statusLabel then
+				objs.statusLabel.Text = "[" .. (label or "Mod") .. "]"
+				objs.statusLabel.TextColor3 = Color3.fromRGB(255, 200, 150)
+			end
+		end
+		if objs.billboard then
+			local head = player.Character and player.Character:FindFirstChild("Head")
+			if head and objs.billboard.Adornee ~= head then
+				objs.billboard.Adornee = head
+			end
+		end
+	end
+
+	local function playSound()
+		if not MD.playSound then return end
+		pcall(function()
+			local s = Instance.new("Sound")
+			s.SoundId = "rbxassetid://" .. MD.soundId
+			s.Volume = 3
+			s.Parent = SoundService
+			s:Play()
+			Debris:AddItem(s, 5)
+		end)
+	end
+
+	local function mdNotify(text)
+		if Library then
+			pcall(function()
+				Library:Notify({ Title = "🚨 Mod Detector", Text = text, Duration = 4 })
+			end)
+		end
+		pcall(function()
+			StarterGui:SetCore("SendNotification", {
+				Title = "🚨 Mod Detector",
+				Text = text,
+				Duration = 5,
+			})
+		end)
+	end
+
+	function mdScanAll()
+		if not MD.enabled then return end
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player ~= lp then
+				local isMd, label = isMod(player)
+				if isMd then
+					if not MD.notified[player.UserId] then
+						MD.notified[player.UserId] = true
+						if MD.notifyOnJoin then
+							mdNotify("Обнаружен модератор: " .. player.Name .. " [" .. (label or "Mod") .. "]")
+						end
+						playSound()
+						addSaved(player, label)
+					end
+					refreshESP(player)
+				else
+					clearESP(player)
+				end
+			end
+		end
+	end
+
+	bind(RS.Heartbeat, function()
+		if not MD.enabled or not MD.running then return end
+		local now = tick()
+		if now - (MD._lastScan or 0) < 0.5 then return end
+		MD._lastScan = now
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player ~= lp then
+				local c = MD.cache[player.UserId]
+				if c and c.isMod then refreshESP(player) end
+			end
+		end
+	end)
+
+	bind(Players.PlayerAdded, function(player)
+		MD.cache[player.UserId] = nil
+		task.wait(1.5)
+		if MD.enabled then
+			local isMd, label = isMod(player)
+			if isMd and not MD.notified[player.UserId] then
+				MD.notified[player.UserId] = true
+				if MD.notifyOnJoin then
+					mdNotify("Обнаружен модератор: " .. player.Name .. " [" .. (label or "Mod") .. "]")
+				end
+				playSound()
+				addSaved(player, label)
+			end
+		end
+	end)
+
+	bind(Players.PlayerRemoving, function(player)
+		clearESP(player)
+		MD.cache[player.UserId] = nil
+		MD.notified[player.UserId] = nil
+		MD.watcherStatus[player.UserId] = nil
+	end)
+
+	task.delay(2, function()
+		if MD.running then mdScanAll() end
+	end)
+
+	task.spawn(function()
+		while MD.running do
+			task.wait(5)
+			if not MD.running then break end
+			if MD.enabled then
+				for uid in pairs(MD.cache) do MD.cache[uid] = nil end
+				mdScanAll()
+			end
+		end
+	end)
+
+	function mdBuildPanel()
+		if MD.adminPanelGui then return end
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "MDPanel_" .. TAG
+		gui.ResetOnSpawn = false
+		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		gui.DisplayOrder = 9995
+		pcall(function() gui.Parent = guiContainer() end)
+		local frame = Instance.new("Frame", gui)
+		frame.Size = UDim2.new(0, 240, 0, 280)
+		frame.Position = UDim2.new(1, -260, 0, 20)
+		frame.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+		frame.BorderSizePixel = 0
+		Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+		local stroke = Instance.new("UIStroke", frame)
+		stroke.Color = Color3.fromRGB(255, 60, 60)
+		stroke.Thickness = 1.5
+		local title = Instance.new("TextLabel", frame)
+		title.Size = UDim2.new(1, 0, 0, 28)
+		title.Position = UDim2.new(0, 0, 0, 6)
+		title.BackgroundTransparency = 1
+		title.Font = Enum.Font.GothamBold
+		title.TextSize = 15
+		title.TextColor3 = Color3.fromRGB(255, 90, 90)
+		title.Text = "🚨 Admins List"
+		local watchingLbl = Instance.new("TextLabel", frame)
+		watchingLbl.Size = UDim2.new(1, -12, 0, 18)
+		watchingLbl.Position = UDim2.new(0, 6, 0, 32)
+		watchingLbl.BackgroundTransparency = 1
+		watchingLbl.Font = Enum.Font.GothamSemibold
+		watchingLbl.TextSize = 11
+		watchingLbl.TextColor3 = Color3.fromRGB(255, 200, 100)
+		watchingLbl.Text = "Статус: —"
+		watchingLbl.TextXAlignment = Enum.TextXAlignment.Left
+		local scroll = Instance.new("ScrollingFrame", frame)
+		scroll.Size = UDim2.new(1, -8, 1, -60)
+		scroll.Position = UDim2.new(0, 4, 0, 54)
+		scroll.BackgroundTransparency = 1
+		scroll.BorderSizePixel = 0
+		scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+		scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		scroll.ScrollBarThickness = 3
+		scroll.ScrollBarImageColor3 = Color3.fromRGB(255, 60, 60)
+		local layout = Instance.new("UIListLayout", scroll)
+		layout.Padding = UDim.new(0, 4)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		local dragging, dragStart, startPos = false, nil, nil
+		bind(title.InputBegan, function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+				dragging, dragStart, startPos = true, i.Position, frame.Position
+			end
+		end)
+		bind(UIS.InputChanged, function(i)
+			if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+				local d = i.Position - dragStart
+				frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+			end
+		end)
+		bind(UIS.InputEnded, function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+				dragging = false
+			end
+		end)
+		MD.adminPanel = { frame = frame, scroll = scroll, watchingLbl = watchingLbl }
+		MD.adminPanelGui = gui
+	end
+
+	function mdDestroyPanel()
+		if MD.adminPanelGui then pcall(function() MD.adminPanelGui:Destroy() end) end
+		MD.adminPanel, MD.adminPanelGui = nil, nil
+	end
+
+	local function refreshPanel()
+		local panel = MD.adminPanel
+		if not panel then return end
+		for _, child in ipairs(panel.scroll:GetChildren()) do
+			if not child:IsA("UIListLayout") then child:Destroy() end
+		end
+		local anyWatching, count = false, 0
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player ~= lp then
+				local isMd, label = isMod(player)
+				if isMd then
+					count = count + 1
+					local watching = MD.watcherStatus[player.UserId] == "watching"
+					if watching then anyWatching = true end
+					local row = Instance.new("Frame")
+					row.Size = UDim2.new(1, -4, 0, 42)
+					row.BackgroundColor3 = watching and Color3.fromRGB(60, 10, 10) or Color3.fromRGB(26, 26, 34)
+					row.BorderSizePixel = 0
+					Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+					row.Parent = panel.scroll
+					local dot = Instance.new("Frame", row)
+					dot.Size = UDim2.fromOffset(8, 8)
+					dot.Position = UDim2.new(0, 6, 0.5, -4)
+					dot.BackgroundColor3 = watching and Color3.fromRGB(255, 0, 0) or Color3.fromRGB(255, 150, 0)
+					dot.BorderSizePixel = 0
+					Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+					local nameLbl = Instance.new("TextLabel", row)
+					nameLbl.Size = UDim2.new(1, -20, 0, 18)
+					nameLbl.Position = UDim2.new(0, 20, 0, 2)
+					nameLbl.BackgroundTransparency = 1
+					nameLbl.Font = Enum.Font.GothamSemibold
+					nameLbl.TextSize = 12
+					nameLbl.TextColor3 = watching and Color3.fromRGB(255, 90, 90) or Color3.fromRGB(220, 220, 240)
+					nameLbl.Text = (watching and "👁 " or "") .. player.Name
+					nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+					nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+					local roleLbl = Instance.new("TextLabel", row)
+					roleLbl.Size = UDim2.new(1, -20, 0, 18)
+					roleLbl.Position = UDim2.new(0, 20, 0, 20)
+					roleLbl.BackgroundTransparency = 1
+					roleLbl.Font = Enum.Font.Gotham
+					roleLbl.TextSize = 10
+					roleLbl.TextColor3 = Color3.fromRGB(180, 180, 200)
+					roleLbl.Text = label or "Mod"
+					roleLbl.TextXAlignment = Enum.TextXAlignment.Left
+					roleLbl.TextTruncate = Enum.TextTruncate.AtEnd
+				end
+			end
+		end
+		if count == 0 then
+			local empty = Instance.new("TextLabel", panel.scroll)
+			empty.Size = UDim2.new(1, 0, 0, 40)
+			empty.BackgroundTransparency = 1
+			empty.Font = Enum.Font.Gotham
+			empty.TextSize = 12
+			empty.TextColor3 = Color3.fromRGB(150, 150, 170)
+			empty.Text = "Нет админов онлайн"
+		end
+		panel.watchingLbl.Text = anyWatching and "⚠️ КТО-ТО СЛЕДИТ ЗА ТОБОЙ!" or "✅ Никто не следит"
+		panel.watchingLbl.TextColor3 = anyWatching and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(80, 220, 120)
+	end
+
+	task.spawn(function()
+		while MD.running do
+			task.wait(0.5)
+			if MD.running and MD.adminPanel then pcall(refreshPanel) end
+		end
+	end)
+
+	function mdCleanup()
+		MD.running = false
+		for userId in pairs(MD.espObjects) do
+			local objs = MD.espObjects[userId]
+			if objs then
+				pcall(function() if objs.highlight then objs.highlight:Destroy() end end)
+				pcall(function() if objs.billboard then objs.billboard:Destroy() end end)
+			end
+		end
+		MD.espObjects = {}
+		MD.watcherStatus = {}
+		if MD.espFolder then pcall(function() MD.espFolder:Destroy() end) end
+		mdDestroyPanel()
+	end
+end -- Mod Detector
+
+---------------------------------------------------------------- Hitbox Expander (ОПТИМИЗИРОВАНО: обновление раз в 0.1с)
+local hbCache = {}
+local hbActiveKillers = {}
+local warnedNoGetConnections = false
+local hbLastUpdate = 0
+
+local function warnNoExecutor()
+	if warnedNoGetConnections then return end
+	warnedNoGetConnections = true
+end
+
+local function isConnection(x)
+	if x == nil then return false end
+	if typeof(x) == "RBXScriptConnection" then return true end
+	local ok = pcall(function() return x.Disconnect end)
+	return ok
+end
+
+local function killConnection(conn)
+	if not conn then return false end
+	if pcall(function() conn:Disconnect() end) then return true end
+	return pcall(function() conn:Disable() end)
+end
+
+local function nuke(sig)
+	if not sig then return 0 end
+	if type(getconnections) ~= "function" then warnNoExecutor() return 0 end
+	local ok, conns = pcall(getconnections, sig)
+	if not ok or not conns then return 0 end
+	local killed = 0
+	for _, conn in ipairs(conns) do
+		if killConnection(conn) then killed = killed + 1 end
+	end
+	return killed
+end
+
+local HB_PROPERTIES = {
+	"Size", "Transparency", "CanCollide", "CanQuery", "CanTouch",
+	"Massless", "CFrame", "Position", "Color", "BrickColor",
+	"Material", "Anchored", "Locked", "Reflectance", "Elasticity",
+	"Friction", "Velocity", "RotVelocity", "AssemblyLinearVelocity",
+	"AssemblyAngularVelocity"
+}
+local HB_EVENTS = {
+	"ChildAdded", "ChildRemoved", "DescendantAdded", "DescendantRemoving",
+	"AncestryChanged", "AttributeChanged", "Destroying", "Changed"
+}
+
+local function cleanSinglePart(hitbox)
+	local total = 0
+	for _, prop in ipairs(HB_PROPERTIES) do
+		local ok, sig = pcall(function() return hitbox:GetPropertyChangedSignal(prop) end)
+		if ok and sig then total = total + nuke(sig) end
+	end
+	local ok, changed = pcall(function() return hitbox.Changed end)
+	if ok and changed then total = total + nuke(changed) end
+	for _, evt in ipairs(HB_EVENTS) do
+		local ok2, sig = pcall(function() return hitbox[evt] end)
+		if ok2 and sig then total = total + nuke(sig) end
+	end
+	return total
+end
+
+local function killHitboxSignals(hitbox)
+	if typeof(hitbox) ~= "Instance" or not hitbox:IsA("BasePart") then return 0 end
+	return cleanSinglePart(hitbox)
+end
+
+local function startSignalKiller(player, hitbox)
+	if not player or not player.UserId then return end
+	if not hitbox or typeof(hitbox) ~= "Instance" then return end
+	if hbActiveKillers[player.UserId] then return end
+	if not player.Parent then return end
+
+	hbActiveKillers[player.UserId] = {}
+	local removing
+	removing = Players.PlayerRemoving:Connect(function(p)
+		if p == player then
+			if hbActiveKillers[player.UserId] and hbActiveKillers[player.UserId].removing then
+				pcall(function() hbActiveKillers[player.UserId].removing:Disconnect() end)
+			end
+			hbActiveKillers[player.UserId] = nil
+		end
+	end)
+	hbActiveKillers[player.UserId].removing = removing
+
+	task.spawn(function()
+		local tries = 0
+		while hbActiveKillers[player.UserId] and hitbox and hitbox.Parent and player.Parent and tries < 60 do
+			killHitboxSignals(hitbox)
+			task.wait(0.8)
+			tries = tries + 1
+		end
+		if hbActiveKillers[player.UserId] and (not hitbox or not hitbox.Parent) then
+			hbActiveKillers[player.UserId] = nil
+		end
+	end)
+end
+
+local function updateHitboxes()
+	local now = tick()
+	if now - hbLastUpdate < 0.1 then return end
+	hbLastUpdate = now
+
+	if not cfg.hitboxEnabled then
+		for plr, hb in pairs(hbCache) do
+			if hb and hb.Parent then
+				hb.Size = Vector3.new(2, 2, 1)
+				hb.Transparency = 1
+			end
+		end
+		return
+	end
+
+	local myChar = lp.Character
+	local hasWeapon = myChar and myChar:FindFirstChildOfClass("Tool") ~= nil
+	
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr == lp then continue end
+		if cfg.hitboxOnlyTarget and getRole(plr) ~= "Target" then continue end
+		if getRole(plr) == "Friend" then continue end
+
+		local char = plr.Character
+		if not char then continue end
+		
+		local hb = char:FindFirstChild("Hitbox")
+		if not hb or not hb:IsA("BasePart") then
+			hbCache[plr] = nil
+			continue
+		end
+		hbCache[plr] = hb
+
+		if hasWeapon then
+			if not hbActiveKillers[plr.UserId] then
+				killHitboxSignals(hb)
+				startSignalKiller(plr, hb)
+			end
+			local s = cfg.hitboxSize
+			hb.Size = Vector3.new(s, s, s)
+			hb.Transparency = cfg.hitboxTransparency
+			hb.CanCollide = false
+			hb.Massless = true
+		else
+			if hb.Size.X > 2 then hb.Size = Vector3.new(2, 2, 1) end
+			hb.Transparency = 1
+		end
+	end
+end
+
+bind(RS.RenderStepped, function()
+	updateHitboxes()
+end)
+
+---------------------------------------------------------------- AutoShot
+local autoShotHosts = {}
+local autoShotLastAmmo = {}
+local autoShotIsBursting = false
+local autoShotF1Down = false
+local autoShotZDown = false
+local autoShotKDown = false
+local autoShotEmojis = {}
+
+local function autoShotSimulateClick()
+	local delay = cfg.autoShotRandomDelay and (cfg.autoShotMinDelay + math.random() * (cfg.autoShotMaxDelay - cfg.autoShotMinDelay)) or cfg.autoShotDelayBeforeShot
+	task.wait(delay)
+	if type(mouse1press) == "function" and type(mouse1release) == "function" then
+		pcall(function()
+			mouse1press()
+			task.wait(cfg.autoShotHoldTime)
+			mouse1release()
+		end)
+	else
+		local c = Workspace.CurrentCamera
+		if c then
+			local vu = game:GetService("VirtualUser")
+			vu:CaptureController()
+			vu:Button1Down(Vector2.new(0, 0), c.CFrame)
+			task.wait(cfg.autoShotHoldTime)
+			vu:Button1Up(Vector2.new(0, 0), c.CFrame)
+		end
+	end
+end
+
+local function autoShotDoBurst(shotsCount)
+	if autoShotIsBursting then return end
+	autoShotIsBursting = true
+	task.spawn(function()
+		for i = 1, shotsCount do
+			autoShotSimulateClick()
+			if i < shotsCount then task.wait(cfg.autoShotBurstDelay) end
+		end
+		autoShotIsBursting = false
+	end)
+end
+
+local function autoShotCheck()
+	if not cfg.autoShotEnabled then return end
+	if #autoShotHosts == 0 then return end
+	
+	for _, host in ipairs(autoShotHosts) do
+		if not host or isIgnored(host) then continue end
+		local char = host.Character
+		if not char then continue end
+		local tool = char:FindFirstChildWhichIsA("Tool")
+		if not tool or not cfg.autoShotWeapons[tool.Name] then continue end
+		
+		local ammo = tool:FindFirstChild("Ammo")
+		if not ammo or not ammo:IsA("IntValue") then continue end
+		
+		local curr = ammo.Value
+		local prev = autoShotLastAmmo[tool]
+		if prev ~= nil and curr < prev then
+			if cfg.autoShotBurstShots > 1 then
+				autoShotDoBurst(cfg.autoShotBurstShots)
+			else
+				autoShotSimulateClick()
+			end
+		end
+		autoShotLastAmmo[tool] = curr
+	end
+end
+
+bind(RS.Heartbeat, autoShotCheck)
+
+local function autoShotRemoveEmoji(plr)
+	if autoShotEmojis[plr.UserId] then
+		pcall(function() autoShotEmojis[plr.UserId]:Destroy() end)
+		autoShotEmojis[plr.UserId] = nil
+	end
+end
+
+local function autoShotAttachEmoji(plr)
+	if not plr or not cfg.autoShotShowEmoji then return end
+	autoShotRemoveEmoji(plr)
+	local char = plr.Character
+	if not char then return end
+	local head = char:FindFirstChild("Head")
+	if not head then return end
+	
+	local bg = Instance.new("BillboardGui")
+	bg.Name = "AutoShotEmoji_" .. plr.UserId
+	bg.Adornee = head
+	bg.Size = UDim2.new(0, 60, 0, 60)
+	bg.StudsOffset = Vector3.new(0, 2.5, 0)
+	bg.AlwaysOnTop = true
+	bg.ResetOnSpawn = false
+	bg.Parent = guiContainer()
+	
+	local lbl = Instance.new("TextLabel", bg)
+	lbl.Size = UDim2.new(1, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = "🎯"
+	lbl.TextColor3 = Color3.fromRGB(255, 215, 0)
+	lbl.TextScaled = true
+	lbl.Font = Enum.Font.Legacy
+	lbl.TextStrokeTransparency = 0
+	lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+	
+	autoShotEmojis[plr.UserId] = bg
+end
+
+local function autoShotAddHost(plr)
+	if #autoShotHosts >= 3 then return false end
+	for _, p in ipairs(autoShotHosts) do if p == plr then return false end end
+	table.insert(autoShotHosts, plr)
+	autoShotAttachEmoji(plr)
+	return true
+end
+
+local function autoShotRemoveHost(plr)
+	for i, p in ipairs(autoShotHosts) do
+		if p == plr then
+			table.remove(autoShotHosts, i)
+			autoShotRemoveEmoji(plr)
+			break
+		end
+	end
+end
+
+local function autoShotIsHost(plr)
+	for _, p in ipairs(autoShotHosts) do if p == plr then return true end end
+	return false
+end
+
+local function autoShotGetClosestToCrosshair()
+	local mouseLoc = UIS:GetMouseLocation()
+	local closest, dist = nil, math.huge
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= lp and plr.Character and plr.Character:FindFirstChild("Head") then
+			local head = plr.Character.Head
+			local sp, onScreen = cam:WorldToViewportPoint(head.Position)
+			if onScreen then
+				local d = (Vector2.new(sp.X, sp.Y) - mouseLoc).Magnitude
+				if d < dist then dist = d; closest = plr end
+			end
+		end
+	end
+	return closest
+end
+
+bind(Players.PlayerRemoving, function(plr)
+	if autoShotIsHost(plr) then autoShotRemoveHost(plr) end
+end)
+
+---------------------------------------------------------------- Menu background
+local menuFxSync, menuFxGui, menuFxOverlay, menuFxBlur, menuFxIsShown
+do
+	local Lighting = game:GetService("Lighting")
+	local MENU_FX_COUNT = 80
+	local MENU_FX_FADE = 0.4
+	local menuFxShown, menuFxVisible = false, false
+	local menuFxParticles, menuFxLines = {}, {}
+	local menuFxRng = Random.new()
+	menuFxIsShown = function() return menuFxShown end
+
+	local function menuFxViewport()
+		local c = Workspace.CurrentCamera
+		return c and c.ViewportSize or Vector2.new(1920, 1080)
+	end
+
+	do
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "X_" .. TAG
+		gui.IgnoreGuiInset = true
+		gui.ResetOnSpawn = false
+		gui.DisplayOrder = -1
+		pcall(function() gui.Parent = guiContainer() end)
+		menuFxGui = gui
+		local overlay = Instance.new("Frame")
+		overlay.Name = "Overlay"
+		overlay.Size = UDim2.fromScale(1, 1)
+		overlay.BackgroundColor3 = Color3.new(0, 0, 0)
+		overlay.BackgroundTransparency = 1
+		overlay.BorderSizePixel = 0
+		overlay.Active = false
+		overlay.Parent = gui
+		menuFxOverlay = overlay
+		local blur = Instance.new("BlurEffect")
+		blur.Name = "B_" .. TAG
+		blur.Size = 0
+		pcall(function() blur.Parent = Lighting end)
+		menuFxBlur = blur
+		local vp = menuFxViewport()
+		for i = 1, MENU_FX_COUNT do
+			local size = menuFxRng:NextInteger(2, 4)
+			local dot = Instance.new("Frame")
+			dot.Size = UDim2.fromOffset(size, size)
+			dot.AnchorPoint = Vector2.new(0.5, 0.5)
+			dot.BackgroundColor3 = Color3.new(1, 1, 1)
+			dot.BackgroundTransparency = menuFxRng:NextNumber(0.2, 0.6)
+			dot.BorderSizePixel = 0
+			dot.Visible = false
+			dot.Parent = overlay
+			Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+			menuFxParticles[i] = {
+				obj = dot,
+				x = menuFxRng:NextNumber(0, vp.X),
+				y = menuFxRng:NextNumber(0, vp.Y),
+				speed = menuFxRng:NextNumber(30, 80),
+				drift = menuFxRng:NextNumber(-5, 5),
+			}
+		end
+	end
+
+	local function menuFxLine(i)
+		local line = menuFxLines[i]
+		if not line then
+			line = Instance.new("Frame")
+			line.AnchorPoint = Vector2.new(0.5, 0.5)
+			line.BackgroundColor3 = Color3.new(1, 1, 1)
+			line.BorderSizePixel = 0
+			line.Visible = false
+			line.Parent = menuFxOverlay
+			menuFxLines[i] = line
+		end
+		return line
+	end
+
+	local function menuFxShow()
+		if not menuFxOverlay then return end
+		menuFxShown = true
+		TweenService:Create(menuFxOverlay, TweenInfo.new(MENU_FX_FADE), {
+			BackgroundTransparency = 1 - math.clamp(cfg.menuFxDim, 0, 90) / 100,
+		}):Play()
+		if menuFxBlur then
+			TweenService:Create(menuFxBlur, TweenInfo.new(MENU_FX_FADE), {
+				Size = math.clamp(cfg.menuFxBlur, 0, 40),
+			}):Play()
+		end
+	end
+
+	local function menuFxHide()
+		if not menuFxOverlay then return end
+		menuFxShown = false
+		for _, p in ipairs(menuFxParticles) do p.obj.Visible = false end
+		for _, l in ipairs(menuFxLines) do l.Visible = false end
+		menuFxVisible = false
+		TweenService:Create(menuFxOverlay, TweenInfo.new(MENU_FX_FADE), { BackgroundTransparency = 1 }):Play()
+		if menuFxBlur then
+			TweenService:Create(menuFxBlur, TweenInfo.new(MENU_FX_FADE), { Size = 0 }):Play()
+		end
+	end
+
+	function menuFxSync(state)
+		if not menuFxOverlay then return end
+		if state and cfg.menuFx then
+			menuFxShow()
+		else
+			menuFxHide()
+		end
+	end
+
+	bind(RS.RenderStepped, function(dt)
+		if not menuFxOverlay then return end
+		if not menuFxShown and menuFxOverlay.BackgroundTransparency >= 0.99 then
+			if menuFxVisible then
+				for _, p in ipairs(menuFxParticles) do p.obj.Visible = false end
+				for _, l in ipairs(menuFxLines) do l.Visible = false end
+				menuFxVisible = false
+			end
+			return
+		end
+		menuFxVisible = true
+		if not cfg.menuFxParticles then
+			for _, p in ipairs(menuFxParticles) do p.obj.Visible = false end
+			for _, l in ipairs(menuFxLines) do l.Visible = false end
+			return
+		end
+		local vp = menuFxViewport()
+		local mouse = UIS:GetMouseLocation()
+		local radius = cfg.menuFxLink
+		local used = 0
+		for _, p in ipairs(menuFxParticles) do
+			p.y = p.y + p.speed * dt
+			p.x = p.x + p.drift * dt
+			if p.y > vp.Y or p.x > vp.X or p.x < 0 then
+				p.y = -10
+				p.x = menuFxRng:NextNumber(0, vp.X)
+			end
+			p.obj.Visible = true
+			p.obj.Position = UDim2.fromOffset(p.x, p.y)
+			local dx, dy = p.x - mouse.X, p.y - mouse.Y
+			local dist = math.sqrt(dx * dx + dy * dy)
+			if radius > 0 and dist < radius then
+				used = used + 1
+				local line = menuFxLine(used)
+				line.Visible = true
+				line.Size = UDim2.fromOffset(dist, 1)
+				line.Position = UDim2.fromOffset((p.x + mouse.X) / 2, (p.y + mouse.Y) / 2)
+				line.Rotation = math.deg(math.atan2(dy, dx))
+				line.BackgroundTransparency = dist / radius
+			end
+		end
+		for i = used + 1, #menuFxLines do
+			menuFxLines[i].Visible = false
+		end
+	end)
+end -- Menu background
+
+---------------------------------------------------------------- menu
+local setMenu
+do
+	function setMenu(state)
+		cfg.menuOpen = state
+		menuFxSync(state)
+		pcall(function()
+			if Library.SetOpen then
+				Library:SetOpen(state)
+				return
+			end
+			Library.Open = state
+			if Window.SetVisible then
+				Window:SetVisible(state)
+			elseif Window.Main then
+				Window.Main.Visible = state
+			end
+		end)
+	end
+
+	local BASE = "https://raw.githubusercontent.com/FacilityHUB/UI-Facility-Test/refs/heads/main/"
+	local src = httpGet(BASE .. "main.luau")
+	assert(src and #src > 1000 and not src:find("404", 1, true), "main.luau not found")
+	local fn, err = loadstring(src)
+	assert(fn, "compile error: " .. tostring(err))
+	Library = fn()
+	assert(type(Library) == "table", "library didn't return a table")
+	Library.BaseUrl = BASE
+	local SaveManager = Library.SaveManager
+	local InterfaceManager = Library.InterfaceManager
+	local ThemeManager = Library.ThemeManager
+	assert(SaveManager and InterfaceManager and ThemeManager, "addons missing")
+
+	Window = Library:Window({
+		Title = "StarTurb",
+		Suffix = "",
+		Width = 720,
+		Height = 520,
+		MinWidth = 520,
+		MinHeight = 340,
+		MobileButton = true,
+		TabStyle = "side",
+		TabWidth = 140,
+	})
+
+	local tabTrig = Window:Tab("TriggerBot", "target")
+	local tabRapid = Window:Tab("Rapid", "zap")
+	local tabFriends = Window:Tab("Friends List", "users")
+	local tabVis = Window:Tab("Visuals", "eye")
+	local tabHB = Window:Tab("Hitbox", "box")
+	local tabMod = Window:Tab("Mod Detector", "shield")
+	local tabAutoShot = Window:Tab("AutoShot", "crosshair")
+	local tabSilent = select(2, pcall(function() return Window:Tab("Silent", "mouse-pointer") end))
+	if not tabSilent then
+		tabSilent = Window:Tab("Silent")
+	end
+
+	local function choice(sec, text, flag, list, default, onPick)
+		local function pick(v)
+			if type(v) == "table" then v = v[1] end
+			if v ~= nil then onPick(v) end
+		end
+		local shapes = {
+			{ Text = text, Flag = flag, Options = list, Default = default, Callback = pick },
+			{ Text = text, Flag = flag, Values = list, Default = default, Callback = pick },
+		}
+		for _, opts in ipairs(shapes) do
+			if pcall(sec.Dropdown, sec, opts) then return end
+		end
+		local i = table.find(list, default) or 1
+		sec:Button({
+			Text = text .. " (click to switch)",
+			Callback = function()
+				i = i % #list + 1
+				onPick(list[i])
+				notify(text .. ": " .. list[i])
+			end,
+		})
+	end
+
+	local function asColor(v, fallback)
+		if typeof(v) == "Color3" then return v end
+		if type(v) == "table" and typeof(v.Color) == "Color3" then return v.Color end
+		return fallback
+	end
+
+	local function colorRow(sec, text, flag, default, setter)
+		local function pick(v)
+			setter(asColor(v, default))
+		end
+		local shapes = {
+			{ Text = text, Flag = flag, Default = default, Callback = pick },
+			{ Text = text, Flag = flag, Default = default, Transparency = 0, Callback = pick },
+		}
+		for _, opts in ipairs(shapes) do
+			if pcall(sec.Colorpicker, sec, opts) then return true end
+		end
+		return false
+	end
+
+	local function modeRows(sec, name, label, flagPrefix)
+		choice(sec, label .. " mode", flagPrefix .. "Mode", { "Toggle", "Hold" }, "Toggle", function(v)
+			bindMode[name] = v
+			holdDown[name] = false
+		end)
+		sec:Keybind({
+			Text = label .. " hold key",
+			Flag = flagPrefix .. "HoldKey",
+			Default = "None",
+			Mode = "hold",
+			Callback = function(active)
+				if type(active) == "boolean" then holdDown[name] = active end
+			end,
+		})
+	end
+
+	local secTrig = tabTrig:Section("TriggerBot", 1)
+	secTrig:Toggle({
+		Text = "TriggerBot",
+		Flag = "TriggerBot",
+		Default = false,
+		Callback = function(v)
+			cfg.trigger = v == true
+			updateTrigger()
+		end,
+	}):Keybind({
+		Default = "RightControl",
+		Flag = "BindTrigger",
+		Mode = "toggle",
+		Callback = function(on)
+			if type(on) == "boolean" then
+				cfg.trigger = on
+				updateTrigger()
+			end
+		end,
+	})
+	modeRows(secTrig, "trigger", "TriggerBot", "Trigger")
+	secTrig:Toggle({
+		Text = "Fire via mouse1click",
+		Flag = "TriggerClick",
+		Default = true,
+		Hint = "выключено = tool:Activate x Shots per step",
+		Callback = function(v) cfg.triggerClick = v == true end,
+	})
+	secTrig:Toggle({
+		Text = "Wall check",
+		Flag = "TriggerWall",
+		Default = false,
+		Hint = "не стрелять через стены (работает и для TriggerSilent)",
+		Callback = function(v) cfg.triggerWallCheck = v == true end,
+	})
+	secTrig:Toggle({
+		Text = "RMB Only",
+		Flag = "TriggerRMB",
+		Default = false,
+		Hint = "shoot only while holding right mouse button",
+		Callback = function(v) cfg.triggerRMB = v == true end,
+	})
+	secTrig:Toggle({
+		Text = "Per-weapon distances",
+		Flag = "TriggerDistEnabled",
+		Default = true,
+		Callback = function(v) cfg.perWeaponDist = v == true end,
+	})
+	secTrig:Slider({
+		Text = "Max Distance",
+		Flag = "TriggerMaxDist",
+		Min = 50, Max = 500,
+		Suffix = " studs",
+		Default = 300,
+		Callback = function(v) cfg.triggerMaxDist = tonumber(v) or 300 end,
+	})
+	secTrig:Slider({
+		Text = "Shots per step",
+		Flag = "ShotsPerStep",
+		Min = 1, Max = 50,
+		Default = 15,
+		Hint = "сколько Activate за шаг кадра (только если mouse1click выключен)",
+		Callback = function(v)
+			cfg.shotsPerStep = math.clamp(math.floor((tonumber(v) or 15) + 0.5), 1, 50)
+		end,
+	})
+
+	local secTrigGuns = tabTrig:Section("Weapons", 2)
+	for name, on in pairs(triggerGuns) do
+		secTrigGuns:Toggle({
+			Text = name,
+			Flag = "TWpn_" .. name,
+			Default = on,
+			Callback = function(v) triggerGuns[name] = v == true end,
+		})
+	end
+
+	local secTrigDist = tabTrig:Section("Distances", 2)
+	for name, dist in pairs(triggerDist) do
+		if name ~= "Default" then
+			secTrigDist:Slider({
+				Text = name,
+				Flag = "TDist_" .. name,
+				Min = 50, Max = 500,
+				Suffix = " studs",
+				Default = dist,
+				Callback = function(v) triggerDist[name] = tonumber(v) or dist end,
+			})
+		end
+	end
+
+	local secRapid = tabRapid:Section("Rapid", 1)
+	secRapid:Toggle({
+		Text = "Rapid",
+		Flag = "Rapid",
+		Default = false,
+		Hint = "hold LMB to fire several Activate calls per frame",
+		Callback = function(v)
+			cfg.rapid = v == true
+			updateRapid()
+		end,
+	}):Keybind({
+		Default = "None",
+		Flag = "BindRapid",
+		Mode = "toggle",
+		Callback = function(on)
+			if type(on) == "boolean" then
+				cfg.rapid = on
+				updateRapid()
+			end
+		end,
+	})
+	secRapid:Slider({
+		Text = "Shots per frame",
+		Flag = "RapidShots",
+		Min = 1, Max = 10,
+		Default = 3,
+		Callback = function(v)
+			cfg.rapidShots = math.clamp(math.floor((tonumber(v) or 3) + 0.5), 1, 10)
+		end,
+	})
+
+	local secRapidBlock = tabRapid:Section("Blocked weapons", 2)
+	for name in pairs(triggerGuns) do
+		secRapidBlock:Toggle({
+			Text = name,
+			Flag = "RBlock_" .. name,
+			Default = rapidBlocked[name] == true,
+			Callback = function(v) rapidBlocked[name] = v == true end,
+		})
+	end
+
+	local secFL = tabFriends:Section("Friends List", 1)
+	secFL:Toggle({
+		Text = "Show list window",
+		Flag = "FriendsWindow",
+		Default = false,
+		Hint = "Floating draggable window with every player and a role button",
+		Callback = function(v) setFriendsWindow(v == true) end,
+	})
+	secFL:Label("Role button cycles: Neutral > Target > Friend")
+	secFL:Label("Neutral / Target = all functions work")
+	secFL:Label("Friend = script fully ignores this player")
+	secFL:Button({
+		Text = "Refresh list",
+		Callback = function() refreshPlayerList() end,
+	})
+	secFL:Button({
+		Text = "Mark Roblox friends as Friend",
+		Callback = function()
+			task.spawn(function()
+				local n = 0
+				for _, plr in ipairs(Players:GetPlayers()) do
+					if plr ~= lp and not roles[plr.UserId] then
+						local ok, fr = pcall(lp.IsFriendsWith, lp, plr.UserId)
+						if ok and fr then
+							roles[plr.UserId] = "Friend"
+							n += 1
+						end
+					end
+				end
+				refreshPlayerList()
+				notify("Marked: " .. n)
+			end)
+		end,
+	})
+	secFL:Button({
+		Text = "Reset all roles",
+		Callback = function()
+			roles = {}
+			refreshPlayerList()
+			notify("Roles reset")
+		end,
+	})
+
+	local secVis = tabVis:Section("ESP", 1)
+	secVis:Toggle({
+		Text = "Enable Visuals",
+		Flag = "VisEnabled",
+		Default = true,
+		Hint = "Box, name, health, distance, tracers and chams",
+		Callback = function(v) cfg.vis = v == true end,
+	}):Keybind({
+		Default = "None",
+		Flag = "BindVisuals",
+		Mode = "toggle",
+		Callback = function(on)
+			if type(on) == "boolean" then cfg.vis = on end
+		end,
+	})
+	secVis:Toggle({
+		Text = "Box",
+		Flag = "VisBox",
+		Default = true,
+		Callback = function(v) cfg.visBox = v == true end,
+	})
+	secVis:Toggle({
+		Text = "Name",
+		Flag = "VisName",
+		Default = true,
+		Callback = function(v) cfg.visName = v == true end,
+	})
+	secVis:Toggle({
+		Text = "Health bar",
+		Flag = "VisHealth",
+		Default = true,
+		Callback = function(v) cfg.visHealth = v == true end,
+	})
+	secVis:Toggle({
+		Text = "Distance",
+		Flag = "VisDistance",
+		Default = true,
+		Callback = function(v) cfg.visDistance = v == true end,
+	})
+	secVis:Toggle({
+		Text = "Tracers",
+		Flag = "VisTracers",
+		Default = true,
+		Callback = function(v) cfg.visTracers = v == true end,
+	})
+	secVis:Toggle({
+		Text = "Chams (highlight)",
+		Flag = "VisChams",
+		Default = true,
+		Hint = "Видно даже когда игрок за экраном",
+		Callback = function(v) cfg.visChams = v == true end,
+	})
+
+	local secVisFilter = tabVis:Section("Filter", 2)
+	secVisFilter:Toggle({
+		Text = "Team check",
+		Flag = "VisTeam",
+		Default = false,
+		Hint = "hide teammates",
+		Callback = function(v) cfg.visTeamCheck = v == true end,
+	})
+	secVisFilter:Slider({
+		Text = "Max distance (0 = off)",
+		Flag = "VisMaxDist",
+		Min = 0, Max = 2000,
+		Suffix = " studs",
+		Default = 0,
+		Callback = function(v) cfg.visMaxDist = tonumber(v) or 0 end,
+	})
+	secVisFilter:Slider({
+		Text = "Text size",
+		Flag = "VisTextSize",
+		Min = 8, Max = 24,
+		Default = 13,
+		Callback = function(v)
+			cfg.visTextSize = math.clamp(math.floor((tonumber(v) or 13) + 0.5), 8, 24)
+		end,
+	})
+
+	local secVisColor = tabVis:Section("Colors", 2)
+	colorRow(secVisColor, "Box color", "VisBoxColor", cfg.visBoxColor, function(v) cfg.visBoxColor = v end)
+	colorRow(secVisColor, "Name / distance", "VisNameColor", cfg.visNameColor, function(v) cfg.visNameColor = v end)
+	colorRow(secVisColor, "Tracer", "VisTracerColor", cfg.visTracerColor, function(v) cfg.visTracerColor = v end)
+	colorRow(secVisColor, "Chams fill", "VisChamsFill", cfg.visChamsFill, function(v) cfg.visChamsFill = v end)
+	colorRow(secVisColor, "Chams outline", "VisChamsOutline", cfg.visChamsOutline, function(v) cfg.visChamsOutline = v end)
+
+	local secMenuFx = tabVis:Section("Menu Background", 3)
+	secMenuFx:Toggle({
+		Text = "Blur + particles behind menu",
+		Flag = "MenuFx",
+		Default = true,
+		Hint = "эффект работает только пока меню открыто",
+		Callback = function(v)
+			cfg.menuFx = v == true
+			menuFxSync(cfg.menuOpen)
+		end,
+	})
+	secMenuFx:Toggle({
+		Text = "Particles",
+		Flag = "MenuFxParticles",
+		Default = true,
+		Callback = function(v) cfg.menuFxParticles = v == true end,
+	})
+	secMenuFx:Slider({
+		Text = "Blur",
+		Flag = "MenuFxBlur",
+		Min = 0, Max = 40,
+		Default = 24,
+		Callback = function(v)
+			cfg.menuFxBlur = tonumber(v) or 24
+			if menuFxIsShown() and menuFxBlur then menuFxBlur.Size = cfg.menuFxBlur end
+		end,
+	})
+	secMenuFx:Slider({
+		Text = "Dim",
+		Flag = "MenuFxDim",
+		Min = 0, Max = 90,
+		Suffix = " %",
+		Default = 65,
+		Callback = function(v)
+			cfg.menuFxDim = tonumber(v) or 65
+			if menuFxIsShown() and menuFxOverlay then
+				menuFxOverlay.BackgroundTransparency = 1 - cfg.menuFxDim / 100
+			end
+		end,
+	})
+	secMenuFx:Slider({
+		Text = "Cursor link radius",
+		Flag = "MenuFxLink",
+		Min = 0, Max = 300,
+		Suffix = " px",
+		Default = 150,
+		Hint = "0 = частицы без линий",
+		Callback = function(v) cfg.menuFxLink = tonumber(v) or 150 end,
+	})
+
+	local secHB = tabHB:Section("Hitbox Expander", 1)
+	secHB:Toggle({
+		Text = "Enable Hitbox",
+		Flag = "HitboxEnabled",
+		Default = false,
+		Hint = "Expands player hitboxes for easier aiming",
+		Callback = function(v) cfg.hitboxEnabled = v == true end,
+	})
+	secHB:Toggle({
+		Text = "Only Targets",
+		Flag = "HitboxOnlyTarget",
+		Default = false,
+		Hint = "Expand hitboxes only for players marked as Target",
+		Callback = function(v) cfg.hitboxOnlyTarget = v == true end,
+	})
+	secHB:Slider({
+		Text = "Hitbox Size",
+		Flag = "HitboxSize",
+		Min = 0, Max = 20,
+		Default = 8,
+		Callback = function(v) cfg.hitboxSize = tonumber(v) or 8 end,
+	})
+	secHB:Slider({
+		Text = "Transparency",
+		Flag = "HitboxTransparency",
+		Min = 0, Max = 1,
+		Default = 1,
+        Decimals = 1,
+		Callback = function(v) cfg.hitboxTransparency = tonumber(v) or 1 end,
+	})
+
+	local secAutoMain = tabAutoShot:Section("Auto Shot", 1)
+	secAutoMain:Toggle({
+		Text = "Enable AutoShot",
+		Flag = "AutoShotEnabled",
+		Default = false,
+		Callback = function(v) cfg.autoShotEnabled = v == true end,
+	})
+	secAutoMain:Toggle({
+		Text = "Random Delay",
+		Flag = "AutoShotRandomDelay",
+		Default = true,
+		Callback = function(v) cfg.autoShotRandomDelay = v == true end,
+	})
+	secAutoMain:Slider({
+		Text = "Min Delay",
+		Flag = "AutoShotMinDelay",
+		Min = 0.01, Max = 0.5,
+		Decimals = 3,
+		Suffix = " s",
+		Default = 0.05,
+		Callback = function(v) cfg.autoShotMinDelay = tonumber(v) or 0.05 end,
+	})
+	secAutoMain:Slider({
+		Text = "Max Delay",
+		Flag = "AutoShotMaxDelay",
+		Min = 0.01, Max = 0.5,
+		Decimals = 3,
+		Suffix = " s",
+		Default = 0.08,
+		Callback = function(v) cfg.autoShotMaxDelay = tonumber(v) or 0.08 end,
+	})
+	secAutoMain:Slider({
+		Text = "Hold Time",
+		Flag = "AutoShotHoldTime",
+		Min = 0.001, Max = 0.1,
+		Decimals = 3,
+		Suffix = " s",
+		Default = 0.01,
+		Callback = function(v) cfg.autoShotHoldTime = tonumber(v) or 0.01 end,
+	})
+	secAutoMain:Slider({
+		Text = "Burst Shots",
+		Flag = "AutoShotBurstShots",
+		Min = 1, Max = 10,
+		Default = 1,
+		Callback = function(v) cfg.autoShotBurstShots = math.floor(tonumber(v) or 1) end,
+	})
+	secAutoMain:Slider({
+		Text = "Burst Delay",
+		Flag = "AutoShotBurstDelay",
+		Min = 0.001, Max = 0.1,
+		Decimals = 3,
+		Suffix = " s",
+		Default = 0.01,
+		Callback = function(v) cfg.autoShotBurstDelay = tonumber(v) or 0.01 end,
+	})
+	secAutoMain:Slider({
+		Text = "Delay Before Shot",
+		Flag = "AutoShotDelayBeforeShot",
+		Min = 0.01, Max = 1.0,
+		Decimals = 2,
+		Suffix = " s",
+		Default = 0.01,
+		Callback = function(v) cfg.autoShotDelayBeforeShot = tonumber(v) or 0.01 end,
+	})
+
+	local secAutoHost = tabAutoShot:Section("Host Settings", 2)
+	secAutoHost:Toggle({
+		Text = "Allow friends as host",
+		Flag = "AutoShotAllowFriends",
+		Default = true,
+		Callback = function(v) cfg.autoShotAllowFriendsAsHost = v == true end,
+	})
+	secAutoHost:Toggle({
+		Text = "Show 🎯 above host",
+		Flag = "AutoShotShowEmoji",
+		Default = true,
+		Callback = function(v)
+			cfg.autoShotShowEmoji = v == true
+			if not v then
+				for _, emoji in pairs(autoShotEmojis) do pcall(function() emoji:Destroy() end) end
+				autoShotEmojis = {}
+			else
+				for _, plr in ipairs(autoShotHosts) do autoShotAttachEmoji(plr) end
+			end
+		end,
+	})
+	secAutoHost:Label("🎯 Host: F1 + Z  |  Toggle Emoji: F1 + K")
+	secAutoHost:Keybind({
+		Text = "AutoShot Toggle Key",
+		Flag = "AutoShotToggleKey",
+		Default = "None",
+		Mode = "toggle",
+		Callback = function(on)
+			if type(on) == "boolean" then
+				cfg.autoShotEnabled = on
+			end
+		end,
+	})
+
+	local secMod = tabMod:Section("Mod Detector", 1)
+	secMod:Toggle({
+		Text = "Enable Mod Detector",
+		Flag = "ModEnabled",
+		Default = true,
+		Hint = "поиск модеров по группам / нику / символам + ESP + уведомления",
+		Callback = function(v) mdConf.enabled = v == true end,
+	})
+	secMod:Toggle({
+		Text = "Show ESP (Highlight + Billboard)",
+		Flag = "ModESP",
+		Default = true,
+		Callback = function(v) mdConf.showESP = v == true end,
+	})
+	secMod:Toggle({
+		Text = "Watcher status",
+		Flag = "ModWatcher",
+		Default = true,
+		Hint = "показывать 'СЛЕДИТ ЗА ТОБОЙ' если модер смотрит в твою сторону",
+		Callback = function(v) mdConf.showWatcherStatus = v == true end,
+	})
+	secMod:Toggle({
+		Text = "Notify on join",
+		Flag = "ModNotify",
+		Default = true,
+		Callback = function(v) mdConf.notifyOnJoin = v == true end,
+	})
+	secMod:Toggle({
+		Text = "Play sound",
+		Flag = "ModSound",
+		Default = true,
+		Hint = "звук через SoundService — слышен только тебе",
+		Callback = function(v) mdConf.playSound = v == true end,
+	})
+	secMod:Input({
+		Text = "Sound id",
+		Flag = "ModSoundId",
+		Default = tostring(mdConf.soundId),
+		Placeholder = "asset id",
+		Callback = function(v)
+			local n = tonumber(v)
+			if n and n > 0 then mdConf.soundId = n end
+		end,
+	})
+
+	local secModPanel = tabMod:Section("Panel", 2)
+	secModPanel:Button({
+		Text = "Open admin panel",
+		Callback = function()
+			mdBuildPanel()
+			notify("Admin panel opened")
+		end,
+	})
+	secModPanel:Button({
+		Text = "Close admin panel",
+		Callback = function() mdDestroyPanel() end,
+	})
+	secModPanel:Button({
+		Text = "Force scan",
+		Callback = function()
+			mdScanAll()
+			notify("Scan complete")
+		end,
+	})
+	secModPanel:Label("История детекций: StarTurb_mods.txt")
+
+	local secSil = tabSilent:Section("Silent Aim", 1)
+	secSil:Toggle({
+		Text = "Silent Aim",
+		Flag = "SilentAim",
+		Default = false,
+		Hint = "Подменяет Raycast / Mouse.Hit: пуля летит в цель, прицел не двигается",
+		Callback = function(v)
+			cfg.silent = v == true
+			local ok, err = pcall(applySilent)
+			if not ok then
+				cfg.silent = false
+				pcall(applySilent)
+				notify("Silent hook failed: " .. tostring(err))
+				return
+			end
+			if cfg.silent and not silentSupported then
+				notify("Executor has no hookmetamethod")
+			end
+		end,
+	}):Keybind({
+		Default = "None",
+		Flag = "BindSilent",
+		Mode = "toggle",
+		Callback = function(on)
+			if type(on) == "boolean" then
+				cfg.silent = on
+				pcall(applySilent)
+			end
+		end,
+	})
+	if not silentSupported then
+		secSil:Label("executor has no hookmetamethod - silent aim unavailable")
+	end
+	secSil:Toggle({
+		Text = "Only while shooting",
+		Flag = "SilentShootOnly",
+		Default = true,
+		Hint = "только пока зажата ЛКМ",
+		Callback = function(v) cfg.silentShootOnly = v == true end,
+	})
+	secSil:Toggle({
+		Text = "Show FOV circle",
+		Flag = "SilentFovShow",
+		Default = false,
+		Callback = function(v) cfg.silentFovShow = v == true end,
+	})
+	secSil:Toggle({
+		Text = "Wall check",
+		Flag = "SilentWall",
+		Default = false,
+		Hint = "только по видимым целям (рейкаст дорогой)",
+		Callback = function(v) cfg.silentWallCheck = v == true end,
+	})
+	secSil:Toggle({
+		Text = "Team check",
+		Flag = "SilentTeam",
+		Default = false,
+		Callback = function(v) cfg.silentTeamCheck = v == true end,
+	})
+	secSil:Toggle({
+		Text = "Skip K.O players",
+		Flag = "SilentSkipKO",
+		Default = true,
+		Callback = function(v) cfg.silentSkipKO = v == true end,
+	})
+
+	local secTrigSil = tabSilent:Section("Trigger Silent", 1)
+	secTrigSil:Toggle({
+		Text = "TriggerSilent",
+		Flag = "TrigSilent",
+		Default = false,
+		Hint = "сам стреляет, когда цель попала в фов Silent Aim - ЛКМ не нужна",
+		Callback = function(v)
+			cfg.trigSilent = v == true
+			if cfg.trigSilent and not cfg.silent then
+				notify("TriggerSilent: сначала включи Silent Aim")
+			end
+		end,
+	})
+	secTrigSil:Label("6 потоков + RenderStepped/Heartbeat/Stepped")
+	secTrigSil:Label("weapons and distance are taken from TriggerBot")
+
+	local secSilTune = tabSilent:Section("Targeting", 2)
+	choice(secSilTune, "Aim part", "SilentPart", {
+		"Head",
+		"Body",
+		"Random",
+	}, "Head", function(v)
+		cfg.silentPart = v
+	end)
+	secSilTune:Label("Head = только голова | Body = корпус | Random = голова/корпус")
+	secSilTune:Slider({
+		Text = "FOV radius",
+		Flag = "SilentFov",
+		Min = 10, Max = 800,
+		Suffix = " px",
+		Default = 130,
+		Callback = function(v) cfg.silentFov = tonumber(v) or 130 end,
+	})
+	secSilTune:Slider({
+		Text = "Hit chance",
+		Flag = "SilentHitChance",
+		Min = 1, Max = 100,
+		Suffix = " %",
+		Default = 100,
+		Hint = "бросок один раз на выстрел",
+		Callback = function(v) cfg.silentHitChance = tonumber(v) or 100 end,
+	})
+	secSilTune:Slider({
+		Text = "Max distance (0 = off)",
+		Flag = "SilentMaxDist",
+		Min = 0, Max = 2000,
+		Suffix = " studs",
+		Default = 0,
+		Callback = function(v) cfg.silentMaxDist = tonumber(v) or 0 end,
+	})
+	secSilTune:Slider({
+		Text = "Prediction",
+		Flag = "SilentPredict",
+		Min = 0, Max = 0.3,
+		Decimals = 3,
+		Suffix = " s",
+		Default = 0,
+		Hint = "скорость цели * это время, 0 = выкл",
+		Callback = function(v) cfg.silentPredict = tonumber(v) or 0 end,
+	})
+
+	local secSilMethods = tabSilent:Section("Method", 2)
+	choice(secSilMethods, "Shot method", "SilentMethod", {
+		"Raycast",
+		"Bullet teleport",
+	}, "Raycast", function(v)
+		cfg.silentMethod = v
+		applySilent()
+		notify("Method: " .. v)
+	end)
+	choice(secSilMethods, "Teleport part", "TpPart", {
+		"HumanoidRootPart",
+		"Head",
+	}, "HumanoidRootPart", function(v)
+		cfg.tpPart = v
+	end)
+	secSilMethods:Toggle({
+		Text = "Turbo (ствол висит на цели)",
+		Flag = "TpTurbo",
+		Default = false,
+		Hint = "макс. темп: ствол не возвращается между выстрелами. ОЧЕНЬ заметно",
+		Callback = function(v) cfg.tpTurbo = v == true end,
+	})
+end -- setMenu
+
+setMenu(cfg.menuOpen)
+
+bind(UIS.InputBegan, function(inp, processed)
+	if processed then return end
+	
+	if inp.KeyCode == Enum.KeyCode.Delete then
+		setMenu(not cfg.menuOpen)
+		return
+	end
+
+	if inp.KeyCode == cfg.panicKey then
+		pcall(env.StarTurbUnload)
+		pcall(function()
+			if Library and Library.Unload then Library:Unload() end
+		end)
+	end
+
+	if inp.KeyCode == Enum.KeyCode.F1 then autoShotF1Down = true end
+	if inp.KeyCode == Enum.KeyCode.Z then autoShotZDown = true end
+	if inp.KeyCode == Enum.KeyCode.K then autoShotKDown = true end
+	
+	if autoShotF1Down and autoShotZDown then
+		local closest = autoShotGetClosestToCrosshair()
+		if closest then
+			if autoShotIsHost(closest) then
+				autoShotRemoveHost(closest)
+				autoShotLastAmmo = {}
+				notify("Host removed: " .. closest.Name)
+			else
+				if cfg.autoShotAllowFriendsAsHost or getRole(closest) ~= "Friend" then
+					if autoShotAddHost(closest) then 
+						autoShotLastAmmo = {}
+						notify("Host added: " .. closest.Name)
+					end
+				end
+			end
+		end
+	end
+	
+	if autoShotF1Down and autoShotKDown then
+		cfg.autoShotShowEmoji = not cfg.autoShotShowEmoji
+		if cfg.autoShotShowEmoji then
+			for _, plr in ipairs(autoShotHosts) do autoShotAttachEmoji(plr) end
+		else
+			for _, emoji in pairs(autoShotEmojis) do pcall(function() emoji:Destroy() end) end
+			autoShotEmojis = {}
+		end
+		notify("Emoji: " .. (cfg.autoShotShowEmoji and "ON" or "OFF"))
+	end
+end)
+
+bind(UIS.InputEnded, function(inp, processed)
+	if inp.KeyCode == Enum.KeyCode.F1 then autoShotF1Down = false end
+	if inp.KeyCode == Enum.KeyCode.Z then autoShotZDown = false end
+	if inp.KeyCode == Enum.KeyCode.K then autoShotKDown = false end
+end)
+
+env.StarTurbUnload = function()
+	cfg.trigger, cfg.rapid, cfg.silent, cfg.trigSilent, cfg.hitboxEnabled, cfg.autoShotEnabled = false, false, false, false, false, false
+
+	pcall(mdCleanup)
+	pcall(visClear)
+	pcall(silentDisableHooks)
+	pcall(tpRestore)
+	pcall(disconnectTrigger)
+	pcall(disconnectRapid)
+
+	for _, emoji in pairs(autoShotEmojis) do pcall(function() emoji:Destroy() end) end
+	autoShotEmojis = {}
+
+	freeDrawing(silentCircle)
+	if friendsGui then pcall(function() friendsGui:Destroy() end) end
+	if menuFxBlur then pcall(function() menuFxBlur:Destroy() end) end
+	if menuFxGui then pcall(function() menuFxGui:Destroy() end) end
+
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	conns = {}
+
+	pcall(function()
+		if Library and Library.Unload then Library:Unload() end
+	end)
+
+	env.StarTurbUnload = nil
+end
